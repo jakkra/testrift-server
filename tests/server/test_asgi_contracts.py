@@ -122,6 +122,16 @@ class TestHTTPContracts:
         assert "Targets" in response.text
         assert "tr-sidebar" in response.text
 
+    def test_target_kpis_page(self, asgi_client):
+        response = asgi_client.get("/targets/demo/kpis")
+        assert response.status_code == 200
+        assert "KPI history" in response.text
+        assert "kpi-metric" in response.text
+        assert 'id="kpi-plots"' in response.text
+        assert 'id="kpi-group-jump"' in response.text
+        assert '<details id="kpi-filter-disclosure" class="kpi-filter-disclosure" hidden>' in response.text
+        assert "<summary>Filters</summary>" in response.text
+
     def test_collections_list_page(self, asgi_client):
         response = asgi_client.get("/collections")
         assert response.status_code == 200

@@ -176,6 +176,10 @@ class _MultipartReader:
         return part
 
 
+class RequestBodyTooLarge(Exception):
+    pass
+
+
 class CompatRequest:
     """Wrap Starlette Request with aiohttp-like attributes used by handlers."""
 
@@ -217,6 +221,16 @@ class CompatRequest:
 
     async def json(self):
         return await self._request.json()
+
+    async def read(self, max_bytes: Optional[int] = None) -> bytes:
+        if max_bytes is None:
+            return await self._request.body()
+        body = bytearray()
+        async for chunk in self._request.stream():
+            body.extend(chunk)
+            if len(body) > max_bytes:
+                raise RequestBodyTooLarge()
+        return bytes(body)
 
     async def post(self):
         form = await self._request.form()

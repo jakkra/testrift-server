@@ -395,6 +395,70 @@ class TestResultsDatabase:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_run_id ON comments (run_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_run_tc ON comments (run_id, tc_id)")
 
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor = await db.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = 1"
+            )
+            if await cursor.fetchone() is None:
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS kpi_batches (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL REFERENCES test_runs(run_id) ON DELETE CASCADE,
+                        source_key TEXT NOT NULL,
+                        checksum_sha256 TEXT NOT NULL,
+                        schema_version INTEGER NOT NULL,
+                        source_type TEXT NOT NULL,
+                        payload_size INTEGER NOT NULL,
+                        sample_count INTEGER NOT NULL,
+                        raw_json TEXT NOT NULL,
+                        provenance_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(run_id, source_key)
+                    )
+                """)
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS kpi_samples (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        batch_id INTEGER NOT NULL REFERENCES kpi_batches(id) ON DELETE CASCADE,
+                        run_id TEXT NOT NULL REFERENCES test_runs(run_id) ON DELETE CASCADE,
+                        test_case_id INTEGER REFERENCES test_cases(id) ON DELETE SET NULL,
+                        test_name TEXT NOT NULL,
+                        match_status TEXT NOT NULL CHECK (match_status IN ('matched', 'unmatched')),
+                        metric_key TEXT NOT NULL,
+                        value REAL NOT NULL,
+                        unit TEXT NOT NULL,
+                        dimensions_json TEXT NOT NULL,
+                        sample_time TEXT,
+                        ordinal INTEGER NOT NULL,
+                        source_type TEXT NOT NULL,
+                        provenance_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(batch_id, ordinal)
+                    )
+                """)
+                await db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_kpi_samples_metric_run "
+                    "ON kpi_samples(metric_key, unit, run_id)"
+                )
+                await db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_kpi_samples_test_case "
+                    "ON kpi_samples(test_case_id, sample_time)"
+                )
+                await db.execute(
+                    "INSERT INTO schema_migrations(version, name) VALUES (1, ?)",
+                    ("generic-kpi-samples",),
+                )
+
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_kpi_samples_metric_test_time "
+                "ON kpi_samples(metric_key, unit, test_name, sample_time)"
+            )
             await db.commit()
 
         self._initialized = True
@@ -1081,6 +1145,383 @@ class TestResultsDatabase:
                 columns = [desc[0] for desc in cursor.description]
                 return dict(zip(columns, row))
             return None
+
+    async def replace_kpi_batch(
+        self,
+        run_id: str,
+        source_key: str,
+        checksum_sha256: str,
+        schema_version: int,
+        source_type: str,
+        raw_json: str,
+        payload_size: int,
+        provenance: Dict[str, Any],
+        samples: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Atomically replace one run-bound KPI source and its normalized samples."""
+        async with self.get_connection() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            run_cursor = await db.execute(
+                "SELECT 1 FROM test_runs WHERE run_id = ?", (run_id,)
+            )
+            if await run_cursor.fetchone() is None:
+                await db.rollback()
+                raise ValueError("Run not found")
+
+            existing_cursor = await db.execute(
+                "SELECT id, checksum_sha256 FROM kpi_batches "
+                "WHERE run_id = ? AND source_key = ?",
+                (run_id, source_key),
+            )
+            existing = await existing_cursor.fetchone()
+            if existing and existing[1] == checksum_sha256:
+                count_cursor = await db.execute(
+                    "SELECT COUNT(*) FROM kpi_samples WHERE batch_id = ?", (existing[0],)
+                )
+                count = (await count_cursor.fetchone())[0]
+                await db.commit()
+                return {"idempotent": True, "batch_id": existing[0], "sample_count": count}
+
+            if existing:
+                await db.execute("DELETE FROM kpi_batches WHERE id = ?", (existing[0],))
+
+            cursor = await db.execute(
+                """INSERT INTO kpi_batches
+                   (run_id, source_key, checksum_sha256, schema_version, source_type,
+                    payload_size, sample_count, raw_json, provenance_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    source_key,
+                    checksum_sha256,
+                    schema_version,
+                    source_type,
+                    payload_size,
+                    len(samples),
+                    raw_json,
+                    json.dumps(provenance, separators=(",", ":")),
+                ),
+            )
+            batch_id = cursor.lastrowid
+            matched_count = 0
+            unmatched_count = 0
+            for ordinal, sample in enumerate(samples):
+                test_case_cursor = await db.execute(
+                    "SELECT id FROM test_cases WHERE run_id = ? AND tc_full_name = ?",
+                    (run_id, sample["test_name"]),
+                )
+                test_case = await test_case_cursor.fetchone()
+                test_case_id = test_case[0] if test_case else None
+                match_status = "matched" if test_case else "unmatched"
+                matched_count += test_case is not None
+                unmatched_count += test_case is None
+                await db.execute(
+                    """INSERT INTO kpi_samples
+                       (batch_id, run_id, test_case_id, test_name, match_status,
+                        metric_key, value, unit, dimensions_json, sample_time,
+                        ordinal, source_type, provenance_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        batch_id,
+                        run_id,
+                        test_case_id,
+                        sample["test_name"],
+                        match_status,
+                        sample["metric_key"],
+                        sample["value"],
+                        sample["unit"],
+                        json.dumps(sample.get("dimensions", {}), separators=(",", ":")),
+                        sample.get("timestamp_utc"),
+                        ordinal,
+                        source_type,
+                        json.dumps(provenance, separators=(",", ":")),
+                    ),
+                )
+
+            await db.commit()
+            return {
+                "idempotent": False,
+                "batch_id": batch_id,
+                "sample_count": len(samples),
+                "matched_count": matched_count,
+                "unmatched_count": unmatched_count,
+            }
+
+    @staticmethod
+    def _kpi_filter_sql(filters: Dict[str, Any]) -> Tuple[str, List[Any]]:
+        clauses = []
+        params: List[Any] = []
+        for key, column in (("run_id", "ks.run_id"), ("target_key", "tr.target_key"),
+                    ("metric_key", "ks.metric_key"), ("unit", "ks.unit"),
+                    ("test_name", "ks.test_name")):
+            if filters.get(key) is not None:
+                clauses.append(f"{column} = ?")
+                params.append(filters[key])
+        target_keys = filters.get("target_keys") or []
+        if target_keys:
+            clauses.append("tr.target_key IN (" + ", ".join("?" for _ in target_keys) + ")")
+            params.extend(target_keys)
+        if filters.get("start_time"):
+            clauses.append("julianday(COALESCE(ks.sample_time, tr.start_time)) >= julianday(?)")
+            params.append(filters["start_time"])
+        if filters.get("end_time"):
+            clauses.append("julianday(COALESCE(ks.sample_time, tr.start_time)) <= julianday(?)")
+            params.append(filters["end_time"])
+        for key, value in (filters.get("dimensions") or {}).items():
+            if not key.isascii() or not key.replace("_", "").isalnum() or not key[0].isalpha():
+                raise ValueError("Invalid KPI dimension name")
+            clauses.append("json_extract(ks.dimensions_json, ?) = ?")
+            params.extend((f"$.{key}", value))
+        source_filters = [(key, column) for key, column in (
+            ("source_role", "source_role"),
+            ("source_branch", "branch"),
+            ("source_revision", "revision"),
+        ) if filters.get(key)]
+        if source_filters:
+            source_clauses = ["sources.run_id = ks.run_id"]
+            for key, column in source_filters:
+                source_clauses.append(f"sources.{column} = ?")
+                params.append(filters[key])
+            clauses.append(
+                "EXISTS (SELECT 1 FROM run_sources sources WHERE "
+                + " AND ".join(source_clauses)
+                + ")"
+            )
+        return (" AND ".join(clauses) if clauses else "1 = 1", params)
+
+    async def get_kpi_samples(
+        self,
+        filters: Dict[str, Any],
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        where, params = self._kpi_filter_sql(filters)
+        query = f"""SELECT ks.*, tr.target_key, tr.purpose, tr.start_time AS run_start_time,
+                          tr.run_name, tc.tc_id
+                   FROM kpi_samples ks
+                   JOIN test_runs tr ON tr.run_id = ks.run_id
+                   LEFT JOIN test_cases tc ON tc.id = ks.test_case_id
+                   WHERE {where}"""
+        async with self.get_connection() as db:
+            count_cursor = await db.execute(
+                f"SELECT COUNT(*) FROM kpi_samples ks JOIN test_runs tr ON tr.run_id = ks.run_id WHERE {where}",
+                params,
+            )
+            total = (await count_cursor.fetchone())[0]
+            cursor = await db.execute(
+                query + " ORDER BY COALESCE(ks.sample_time, tr.start_time), ks.run_id, ks.ordinal LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            )
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in await cursor.fetchall()], total
+
+    async def get_kpi_history(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Return testcase choices and per-run aggregates for a family or one test."""
+        testcase_filters = {key: value for key, value in filters.items()
+                            if key not in ("test_name", "test_group", "catalog_only")}
+        testcase_where, testcase_params = self._kpi_filter_sql(testcase_filters)
+        if filters.get("catalog_only") and not filters.get("metric_key"):
+            query = f"""SELECT ks.metric_key, ks.unit, ks.test_name,
+                               COUNT(*) AS sample_count,
+                               COUNT(DISTINCT ks.run_id) AS run_count,
+                               MAX(COALESCE(ks.sample_time, tr.start_time)) AS last_sample,
+                               MAX(ABS(ks.value)) AS max_abs_value
+                        FROM kpi_samples ks
+                        JOIN test_runs tr ON tr.run_id = ks.run_id
+                        WHERE {testcase_where}
+                        GROUP BY ks.metric_key, ks.unit, ks.test_name
+                        ORDER BY ks.metric_key, ks.unit, last_sample DESC, ks.test_name"""
+            async with self.get_connection() as db:
+                cursor = await db.execute(query, testcase_params)
+                columns = [column[0] for column in cursor.description]
+                testcases = [dict(zip(columns, row)) for row in await cursor.fetchall()]
+            return {"testcases": testcases, "selected_test_name": None,
+                    "series_test_names": [], "data": [],
+                    "summary": {"run_count": 0, "sample_count": 0}}
+        testcase_query = f"""SELECT ks.test_name,
+                                    COUNT(*) AS sample_count,
+                                    COUNT(DISTINCT ks.run_id) AS run_count,
+                                    MAX(COALESCE(ks.sample_time, tr.start_time)) AS last_sample
+                             FROM kpi_samples ks
+                             JOIN test_runs tr ON tr.run_id = ks.run_id
+                             WHERE {testcase_where}
+                             GROUP BY ks.test_name
+                             ORDER BY last_sample DESC, ks.test_name"""
+
+        async with self.get_connection() as db:
+            cursor = await db.execute(testcase_query, testcase_params)
+            columns = [column[0] for column in cursor.description]
+            testcases = [dict(zip(columns, row)) for row in await cursor.fetchall()]
+            selected_test_name = filters.get("test_name")
+            testcase_names = {item["test_name"] for item in testcases}
+            if selected_test_name not in testcase_names:
+                selected_test_name = None
+            test_group = filters.get("test_group")
+            if test_group and not any(item["test_name"].rpartition(".")[0] == test_group
+                                      for item in testcases):
+                raise ValueError("Unknown KPI test group")
+            series_test_names = ([selected_test_name] if selected_test_name else
+                                 [item["test_name"] for item in testcases
+                                  if item["test_name"].rpartition(".")[0] == test_group]
+                                 if test_group else
+                                 [item["test_name"] for item in sorted(
+                                     testcases, key=lambda item: (-item["run_count"], item["test_name"])
+                                 )[:8]])
+
+            points = []
+            sample_count = 0
+            if series_test_names and not filters.get("catalog_only"):
+                where, params = self._kpi_filter_sql(testcase_filters)
+                placeholders = ", ".join("?" for _ in series_test_names)
+                query = f"""SELECT ks.run_id,
+                                   tr.target_key,
+                                   tr.run_name,
+                                   tr.start_time AS run_start_time,
+                                   ks.test_name,
+                            MAX(tc.tc_id) AS test_case_id,
+                                   COUNT(*) AS sample_count,
+                                   AVG(ks.value) AS value,
+                                   MIN(ks.value) AS minimum,
+                                   MAX(ks.value) AS maximum
+                            FROM kpi_samples ks
+                            JOIN test_runs tr ON tr.run_id = ks.run_id
+                        LEFT JOIN test_cases tc ON tc.id = ks.test_case_id
+                            WHERE {where} AND ks.test_name IN ({placeholders})
+                            GROUP BY ks.run_id, tr.target_key, tr.run_name, tr.start_time, ks.test_name
+                            ORDER BY tr.start_time, ks.run_id, ks.test_name"""
+                cursor = await db.execute(query, (*params, *series_test_names))
+                columns = [column[0] for column in cursor.description]
+                points = [dict(zip(columns, row)) for row in await cursor.fetchall()]
+                sample_count = sum(point["sample_count"] for point in points)
+
+        return {
+            "testcases": testcases,
+            "selected_test_name": selected_test_name,
+            "series_test_names": series_test_names,
+            "data": points,
+            "summary": {"run_count": len({point["run_id"] for point in points}), "sample_count": sample_count},
+        }
+
+    async def get_kpi_catalog(
+        self,
+        filters: Dict[str, Any],
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        where, params = self._kpi_filter_sql(filters)
+        query = f"""SELECT ks.metric_key, ks.unit, tr.target_key, ks.dimensions_json,
+                          COUNT(*) AS sample_count,
+                          MIN(COALESCE(ks.sample_time, tr.start_time)) AS first_sample,
+                          MAX(COALESCE(ks.sample_time, tr.start_time)) AS last_sample
+                   FROM kpi_samples ks
+                   JOIN test_runs tr ON tr.run_id = ks.run_id
+                   WHERE {where}
+                   GROUP BY ks.metric_key, ks.unit, tr.target_key, ks.dimensions_json"""
+        async with self.get_connection() as db:
+            count_cursor = await db.execute(
+                f"SELECT COUNT(*) FROM ({query})", params
+            )
+            total = (await count_cursor.fetchone())[0]
+            cursor = await db.execute(
+                query + " ORDER BY ks.metric_key, ks.unit, tr.target_key, ks.dimensions_json LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            )
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in await cursor.fetchall()], total
+
+    async def get_kpi_dimension_options(
+        self,
+        filters: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        where, params = self._kpi_filter_sql(filters)
+        query = f"""WITH dimension_sets AS (
+                       SELECT DISTINCT ks.dimensions_json
+                       FROM kpi_samples ks
+                       JOIN test_runs tr ON tr.run_id = ks.run_id
+                       WHERE {where}
+                   )
+                   SELECT DISTINCT dimension.key, dimension.type, dimension.value
+                   FROM dimension_sets,
+                        json_each(dimension_sets.dimensions_json) AS dimension
+                   ORDER BY dimension.key, dimension.type, dimension.value"""
+        async with self.get_connection() as db:
+            cursor = await db.execute(query, params)
+            options: Dict[str, List[Any]] = {}
+            for key, value_type, value in await cursor.fetchall():
+                if value_type == "true":
+                    value = True
+                elif value_type == "false":
+                    value = False
+                elif value_type in ("array", "object"):
+                    value = json.loads(value)
+                options.setdefault(key, []).append(value)
+            return [
+                {"dimension_key": key, "values": values}
+                for key, values in options.items()
+            ]
+
+    async def get_kpi_metrics(self, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """List available metric/unit pairs without dimension-level duplication."""
+        where, params = self._kpi_filter_sql(filters)
+        query = f"""SELECT ks.metric_key, ks.unit, tr.target_key,
+                            COUNT(*) AS sample_count,
+                            MIN(COALESCE(ks.sample_time, tr.start_time)) AS first_sample,
+                            MAX(COALESCE(ks.sample_time, tr.start_time)) AS last_sample
+                     FROM kpi_samples ks
+                     JOIN test_runs tr ON tr.run_id = ks.run_id
+                     WHERE {where}
+                     GROUP BY ks.metric_key, ks.unit, tr.target_key
+                     ORDER BY ks.metric_key, ks.unit"""
+        async with self.get_connection() as db:
+            cursor = await db.execute(query, params)
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in await cursor.fetchall()]
+
+    async def get_kpi_source_options(
+        self,
+        filters: Dict[str, Any],
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        where, params = self._kpi_filter_sql(filters)
+        query = f"""SELECT DISTINCT sources.source_role, sources.branch, sources.revision
+                   FROM kpi_samples ks
+                   JOIN test_runs tr ON tr.run_id = ks.run_id
+                   JOIN run_sources sources ON sources.run_id = ks.run_id
+                   WHERE {where}"""
+        async with self.get_connection() as db:
+            count_cursor = await db.execute(f"SELECT COUNT(*) FROM ({query})", params)
+            total = (await count_cursor.fetchone())[0]
+            cursor = await db.execute(
+                query + " ORDER BY sources.source_role, sources.branch, sources.revision LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            )
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in await cursor.fetchall()], total
+
+    async def get_kpi_runs(
+        self,
+        filters: Dict[str, Any],
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """List runs that contain samples matching a KPI selection."""
+        where, params = self._kpi_filter_sql(filters)
+        query = f"""SELECT tr.run_id, tr.run_name, tr.start_time, tr.end_time,
+                          tr.status, COUNT(ks.id) AS sample_count
+                   FROM kpi_samples ks
+                   JOIN test_runs tr ON tr.run_id = ks.run_id
+                   WHERE {where}
+                   GROUP BY tr.run_id"""
+        async with self.get_connection() as db:
+            count_cursor = await db.execute(f"SELECT COUNT(*) FROM ({query})", params)
+            total = (await count_cursor.fetchone())[0]
+            cursor = await db.execute(
+                query + " ORDER BY tr.start_time DESC, tr.run_id DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            )
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in await cursor.fetchall()], total
 
     async def get_test_cases_for_run(self, run_id: str) -> List[Dict[str, Any]]:
         """Get all test cases for a specific run."""

@@ -200,6 +200,8 @@ def _is_ingest_post(path: str) -> bool:
         return True
     if re.match(r"^/api/runs/[^/]+/commits$", path):
         return True
+    if re.match(r"^/api/runs/[^/]+/kpis$", path):
+        return True
     return False
 
 

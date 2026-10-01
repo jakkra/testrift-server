@@ -79,6 +79,22 @@ def test_commit_upload_requires_token(ingest_client):
     assert response.json()["error"] == auth.INGEST_TOKEN_ERROR_MESSAGE
 
 
+def test_kpi_upload_requires_token(ingest_client):
+    response = ingest_client.post("/api/runs/run1/kpis", json={})
+    assert response.status_code == 401
+    assert response.json()["error"] == auth.INGEST_TOKEN_ERROR_MESSAGE
+
+
+def test_kpi_upload_with_token_passes_ingest_gate(ingest_client):
+    response = ingest_client.post(
+        "/api/runs/run1/kpis",
+        headers={auth.INGEST_TOKEN_HEADER: TOKEN},
+        json={},
+    )
+    assert response.status_code == 404
+    assert response.json()["error"] == "Run not found"
+
+
 def test_health_stays_open(ingest_client):
     assert ingest_client.get("/health").status_code == 200
 

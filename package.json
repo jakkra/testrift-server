@@ -8,5 +8,8 @@
   "devDependencies": {
     "jest": "^27.5.1",
     "jest-environment-jsdom": "^27.5.1"
+  },
+  "dependencies": {
+    "echarts": "6.1.0"
   }
 }

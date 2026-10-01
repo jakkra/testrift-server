@@ -160,6 +160,9 @@ def test_http_ingest_rejected_when_tls_on(tls_ingest_app):
         response = client.post("/api/runs/run1/commits", json={})
         assert response.status_code == 400
         assert response.json()["error"] == auth.INGEST_TLS_REQUIRED_MESSAGE
+        kpi_response = client.post("/api/runs/run1/kpis", json={})
+        assert kpi_response.status_code == 400
+        assert kpi_response.json()["error"] == auth.INGEST_TLS_REQUIRED_MESSAGE
         with pytest.raises(Exception):
             with client.websocket_connect("/ws/nunit"):
                 pass

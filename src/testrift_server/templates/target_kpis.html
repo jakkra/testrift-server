@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}KPI history · {{ target_key }} · TestRift{% endblock %}
+{% block head %}
+<link href="/static/kpi_dashboard.css?v=12" rel="stylesheet">
+{% endblock %}
+{% block body %}
+<main class="kpi-page" id="kpi-page">
+  <header class="kpi-header">
+    <div>
+      <p class="kpi-eyebrow">Historical measurements</p>
+      <h1>KPI history</h1>
+      <p class="kpi-target">{{ target_key | e }}</p>
+    </div>
+    <div class="kpi-header-actions">
+      <a class="kpi-back" href="/targets/{{ target_key | urlencode }}"><i class="fas fa-arrow-left" aria-hidden="true"></i><span>Target runs</span></a>
+    </div>
+  </header>
+
+  <dialog class="kpi-compare-dialog" id="kpi-compare-dialog" aria-labelledby="kpi-compare-title">
+    <div class="kpi-compare-dialog-content">
+      <header class="kpi-compare-dialog-header">
+        <h2 id="kpi-compare-title">Compare test across products</h2>
+        <button type="button" id="kpi-compare-close" class="kpi-dialog-icon-button" aria-label="Close comparison">
+          <i class="fas fa-times" aria-hidden="true"></i>
+        </button>
+      </header>
+      <p class="kpi-compare-selection" id="kpi-compare-selection"></p>
+      <div class="kpi-comparison-actions">
+        <button type="button" id="kpi-compare-all">All compatible</button>
+        <button type="button" id="kpi-compare-clear">Clear selection</button>
+      </div>
+      <div class="kpi-comparison-targets" id="kpi-comparison-targets" role="group" aria-label="Products to compare"></div>
+      <p class="kpi-comparison-note" id="kpi-comparison-note" aria-live="polite"></p>
+      <footer class="kpi-compare-dialog-footer">
+        <button type="button" id="kpi-compare-cancel">Cancel</button>
+        <button type="button" id="kpi-compare-apply" class="kpi-compare-apply">Compare</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <section class="kpi-controls" aria-label="KPI history selection">
+    <label>Metric
+      <select id="kpi-metric" disabled><option>Loading metrics...</option></select>
+    </label>
+    <label>Test case
+      <select id="kpi-testcase" disabled><option>Loading test cases...</option></select>
+    </label>
+    <div class="kpi-range-control" role="group" aria-label="History range">
+      <span>Range</span>
+      <div id="kpi-range" class="kpi-range">
+        <button type="button" data-days="30" aria-pressed="true" title="Last 30 days">30d</button>
+        <button type="button" data-days="90" aria-pressed="false" title="Last 90 days">90d</button>
+        <button type="button" data-days="180" aria-pressed="false" title="Last 6 months">6m</button>
+        <button type="button" data-days="365" aria-pressed="false" title="Last 12 months">1y</button>
+        <button type="button" data-days="all" aria-pressed="false" title="All available history">All</button>
+      </div>
+    </div>
+  </section>
+  <details id="kpi-filter-disclosure" class="kpi-filter-disclosure" hidden>
+    <summary>Filters</summary>
+    <div id="kpi-dimension-filters" class="kpi-dimension-filters" aria-label="KPI dimensions and build filters" hidden></div>
+  </details>
+
+  <div id="kpi-status" class="kpi-status" role="status" aria-live="polite"></div>
+
+  <div class="kpi-group-toolbar" id="kpi-group-toolbar" hidden>
+    <span id="kpi-group-count"></span>
+    <div class="kpi-group-actions">
+      <button type="button" id="kpi-groups-expand">Expand groups</button>
+      <button type="button" id="kpi-groups-collapse">Collapse groups</button>
+    </div>
+    <label>Jump to test family <select id="kpi-group-jump"></select></label>
+  </div>
+  <div id="kpi-plots" aria-label="KPI history by test family"></div>
+</main>
+{% endblock %}
+{% block scripts %}
+<script>window.KPI_TARGET = {{ target_key | tojson }};</script>
+<script src="/static/echarts.min.js" defer></script>
+<script src="/static/kpi_grouped_charts.js?v=24" defer></script>
+{% endblock %}

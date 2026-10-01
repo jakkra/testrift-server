@@ -5,13 +5,16 @@ All /api/* endpoints for test results analysis and data access.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
+import math
 import os
 import re
 import sqlite3
 from datetime import datetime, timezone
 
-from .http_compat import web
+from .http_compat import RequestBodyTooLarge, web
 
 from .config import (
     CONFIG,
@@ -39,6 +42,10 @@ logger = logging.getLogger(__name__)
 
 TARGET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 PURPOSES = {"nightly", "release", "feature", "manual", "sanity", "rerun"}
+MAX_KPI_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_KPI_SAMPLES = 10000
+KPI_METRIC_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+KPI_UNIT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/%*-]{0,31}$")
 
 
 async def _json_body(request):
@@ -62,6 +69,317 @@ def _validate_display_name(value):
 
 def _validation_error(error):
     return web.json_response({"success": False, "error": str(error)}, status=400)
+
+
+def _validate_kpi_payload(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("JSON object required")
+    version = payload.get("_schemaVersion")
+    if type(version) is not int or version != 1:
+        raise ValueError("Unsupported or missing _schemaVersion")
+    samples = payload.get("_samples")
+    if not isinstance(samples, list) or len(samples) > MAX_KPI_SAMPLES:
+        raise ValueError("_samples must be an array with at most 10000 items")
+
+    normalized = []
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            raise ValueError(f"_samples[{index}] must be an object")
+        metric_key = sample.get("metric_key")
+        unit = sample.get("unit")
+        test_name = sample.get("test_name")
+        value = sample.get("value")
+        if not isinstance(metric_key, str) or not KPI_METRIC_KEY_PATTERN.fullmatch(metric_key):
+            raise ValueError(f"_samples[{index}].metric_key is invalid")
+        if not isinstance(unit, str) or not KPI_UNIT_PATTERN.fullmatch(unit):
+            raise ValueError(f"_samples[{index}].unit is invalid")
+        if not isinstance(test_name, str) or not test_name.strip() or len(test_name) > 1024:
+            raise ValueError(f"_samples[{index}].test_name is invalid")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"_samples[{index}].value must be numeric")
+        try:
+            numeric_value = float(value)
+        except (OverflowError, ValueError):
+            raise ValueError(f"_samples[{index}].value must be finite")
+        if not math.isfinite(numeric_value):
+            raise ValueError(f"_samples[{index}].value must be finite")
+
+        dimensions = sample.get("dimensions", {})
+        if not isinstance(dimensions, dict) or len(dimensions) > 32:
+            raise ValueError(f"_samples[{index}].dimensions must be an object with at most 32 items")
+        for key, dimension in dimensions.items():
+            if not isinstance(key, str) or not key.isascii() or not key.replace("_", "").isalnum() or not key[0].isalpha():
+                raise ValueError(f"_samples[{index}] has an invalid dimension name")
+            if isinstance(dimension, bool):
+                continue
+            if isinstance(dimension, (int, float)):
+                if not math.isfinite(float(dimension)):
+                    raise ValueError(f"_samples[{index}] has a non-finite dimension")
+            elif not isinstance(dimension, str) or len(dimension) > 256:
+                raise ValueError(f"_samples[{index}] has an invalid dimension value")
+
+        timestamp = sample.get("timestamp_utc")
+        if timestamp is not None:
+            if not isinstance(timestamp, str):
+                raise ValueError(f"_samples[{index}].timestamp_utc must be a string")
+            try:
+                parsed_timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError(f"_samples[{index}].timestamp_utc must be ISO-8601")
+            if parsed_timestamp.tzinfo is None:
+                raise ValueError(f"_samples[{index}].timestamp_utc must include a timezone")
+
+        normalized.append({
+            "metric_key": metric_key,
+            "value": numeric_value,
+            "unit": unit,
+            "test_name": test_name,
+            "dimensions": dimensions,
+            "timestamp_utc": timestamp,
+        })
+    return version, normalized
+
+
+def _kpi_read_filters(request, require_series=False):
+    query = request.query
+    filters = {}
+    if hasattr(query, "getall"):
+        target_values = query.getall("target", [])
+    elif hasattr(query, "getlist"):
+        target_values = query.getlist("target")
+    else:
+        target_values = query.get("target")
+    if isinstance(target_values, str):
+        target_values = [target_values]
+    elif not target_values:
+        target_values = []
+    target_keys = list(dict.fromkeys(value for value in target_values if value))
+    if len(target_keys) > 50:
+        raise ValueError("at most 50 targets may be queried at once")
+    if any(not TARGET_KEY_PATTERN.fullmatch(value) for value in target_keys):
+        raise ValueError("target is invalid")
+    if len(target_keys) == 1:
+        filters["target_key"] = target_keys[0]
+    elif target_keys:
+        filters["target_keys"] = target_keys
+
+    for query_name, filter_name in (("run_id", "run_id"),
+                                    ("metric_key", "metric_key"), ("unit", "unit")):
+        value = query.get(query_name)
+        if value:
+            filters[filter_name] = value
+    if filters.get("metric_key") and not KPI_METRIC_KEY_PATTERN.fullmatch(filters["metric_key"]):
+        raise ValueError("metric_key is invalid")
+    if filters.get("unit") and not KPI_UNIT_PATTERN.fullmatch(filters["unit"]):
+        raise ValueError("unit is invalid")
+    if require_series and (not filters.get("metric_key") or not filters.get("unit")):
+        raise ValueError("metric_key and unit are required")
+
+    for key in ("source_role", "source_branch", "source_revision"):
+        value = query.get(key)
+        if value:
+            if len(value) > 256:
+                raise ValueError(f"{key} is too long")
+            filters[key] = value
+
+    for query_name, filter_name in (("from", "start_time"), ("to", "end_time")):
+        value = query.get(query_name)
+        if value:
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError(f"{query_name} must be ISO-8601")
+            if parsed.tzinfo is None:
+                raise ValueError(f"{query_name} must include a timezone")
+            filters[filter_name] = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    dimensions = {}
+    for name, value in query.items():
+        if name.startswith("dimension."):
+            key = name[len("dimension."):]
+            try:
+                dimensions[key] = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                dimensions[key] = value
+    if dimensions:
+        filters["dimensions"] = dimensions
+
+    try:
+        limit = int(query.get("limit", 100))
+        offset = int(query.get("offset", 0))
+    except (TypeError, ValueError):
+        raise ValueError("limit and offset must be integers")
+    if not 1 <= limit <= 500 or not 0 <= offset <= 1000000:
+        raise ValueError("limit must be 1..500 and offset must be 0..1000000")
+    return filters, limit, offset
+
+
+async def api_run_kpis_handler(request):
+    run_id = request.match_info["run_id"]
+    if not validate_run_id(run_id):
+        return web.json_response({"success": False, "error": "Invalid run ID"}, status=400)
+
+    run = await database.db.get_test_run_by_id(run_id)
+    if run is None:
+        return web.json_response({"success": False, "error": "Run not found"}, status=404)
+
+    if request.method == "GET":
+        try:
+            filters, limit, offset = _kpi_read_filters(request)
+            filters["run_id"] = run_id
+            samples, total = await database.db.get_kpi_samples(filters, limit, offset)
+            for sample in samples:
+                sample["dimensions"] = json.loads(sample.pop("dimensions_json"))
+                sample["provenance"] = json.loads(sample.pop("provenance_json"))
+            return web.json_response({
+                "success": True,
+                "data": samples,
+                "pagination": {"limit": limit, "offset": offset, "count": total},
+            })
+        except ValueError as error:
+            return _validation_error(error)
+
+    content_length = request.headers.get("content-length")
+    try:
+        if content_length and int(content_length) > MAX_KPI_UPLOAD_BYTES:
+            return web.json_response({"success": False, "error": "KPI payload exceeds 10 MB"}, status=413)
+    except ValueError:
+        return _validation_error(ValueError("Invalid Content-Length"))
+    try:
+        raw_body = await request.read(MAX_KPI_UPLOAD_BYTES)
+    except RequestBodyTooLarge:
+        return web.json_response({"success": False, "error": "KPI payload exceeds 10 MB"}, status=413)
+    except Exception:
+        return _validation_error(ValueError("Invalid JSON body"))
+    try:
+        raw_json = raw_body.decode("utf-8")
+        payload = json.loads(raw_json)
+        version, samples = _validate_kpi_payload(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        return _validation_error(error)
+
+    checksum = hashlib.sha256(raw_body).hexdigest()
+    provenance = {"client": "TestRift.NUnit", "source_file": "kpi.json"}
+    try:
+        result = await database.db.replace_kpi_batch(
+            run_id=run_id,
+            source_key="nunit:kpi.json",
+            checksum_sha256=checksum,
+            schema_version=version,
+            source_type="nunit-json-kpi",
+            raw_json=raw_json,
+            payload_size=len(raw_body),
+            provenance=provenance,
+            samples=samples,
+        )
+    except ValueError as error:
+        return web.json_response({"success": False, "error": str(error)}, status=404)
+    return web.json_response({"success": True, **result}, status=200 if result["idempotent"] else 201)
+
+
+async def api_kpi_catalog_handler(request):
+    try:
+        filters, limit, offset = _kpi_read_filters(request)
+        items, total = await database.db.get_kpi_catalog(filters, limit, offset)
+        for item in items:
+            item["dimensions"] = json.loads(item.pop("dimensions_json"))
+        return web.json_response({
+            "success": True,
+            "data": items,
+            "pagination": {"limit": limit, "offset": offset, "count": total},
+        })
+    except ValueError as error:
+        return _validation_error(error)
+
+
+async def api_kpi_dimension_options_handler(request):
+    try:
+        filters, _, _ = _kpi_read_filters(request)
+        options = await database.db.get_kpi_dimension_options(filters)
+        return web.json_response({"success": True, "data": options})
+    except ValueError as error:
+        return _validation_error(error)
+
+
+async def api_kpi_metrics_handler(request):
+    try:
+        filters, _, _ = _kpi_read_filters(request)
+        if not filters.get("target_key") and not filters.get("target_keys"):
+            raise ValueError("target is required")
+        metrics = await database.db.get_kpi_metrics(filters)
+        return web.json_response({"success": True, "data": metrics})
+    except ValueError as error:
+        return _validation_error(error)
+
+
+async def api_kpi_runs_handler(request):
+    try:
+        filters, limit, offset = _kpi_read_filters(request)
+        if (not filters.get("target_key") and not filters.get("target_keys")) or not filters.get("metric_key") or not filters.get("unit"):
+            raise ValueError("target, metric_key, and unit are required")
+        runs, total = await database.db.get_kpi_runs(filters, limit, offset)
+        return web.json_response({
+            "success": True,
+            "data": runs,
+            "pagination": {"limit": limit, "offset": offset, "count": total},
+        })
+    except ValueError as error:
+        return _validation_error(error)
+
+
+async def api_kpi_source_options_handler(request):
+    try:
+        filters, limit, offset = _kpi_read_filters(request)
+        if not filters.get("target_key") and not filters.get("target_keys"):
+            raise ValueError("target is required")
+        options, total = await database.db.get_kpi_source_options(filters, limit, offset)
+        return web.json_response({
+            "success": True,
+            "data": options,
+            "pagination": {"limit": limit, "offset": offset, "count": total},
+        })
+    except ValueError as error:
+        return _validation_error(error)
+
+
+async def api_kpi_series_handler(request):
+    try:
+        filters, limit, offset = _kpi_read_filters(request, require_series=True)
+        samples, total = await database.db.get_kpi_samples(filters, limit, offset)
+        for sample in samples:
+            sample["dimensions"] = json.loads(sample.pop("dimensions_json"))
+            sample["provenance"] = json.loads(sample.pop("provenance_json"))
+        return web.json_response({
+            "success": True,
+            "data": samples,
+            "pagination": {"limit": limit, "offset": offset, "count": total},
+        })
+    except ValueError as error:
+        return _validation_error(error)
+
+
+async def api_kpi_history_handler(request):
+    try:
+        catalog_only = request.query.get("catalog_only") == "1"
+        filters, _, _ = _kpi_read_filters(request, require_series=not catalog_only)
+        if not filters.get("target_key") and not filters.get("target_keys"):
+            raise ValueError("target is required")
+        test_name = request.query.get("test_name")
+        if test_name is not None:
+            if not test_name.strip() or len(test_name) > 1024:
+                raise ValueError("test_name must contain 1..1024 characters")
+            filters["test_name"] = test_name
+        test_group = request.query.get("test_group")
+        if test_group is not None:
+            if not test_group.strip() or len(test_group) > 1024 or test_name is not None:
+                raise ValueError("test_group must contain 1..1024 characters and cannot be combined with test_name")
+            filters["test_group"] = test_group
+        if catalog_only:
+            filters["catalog_only"] = True
+        result = await database.db.get_kpi_history(filters)
+        return web.json_response({"success": True, **result})
+    except ValueError as error:
+        return _validation_error(error)
 
 
 async def _context_run_ids(request, current_run_id=None):
@@ -1959,6 +2277,14 @@ def get_routes():
         (("POST",), "/api/admin/shutdown", api_admin_shutdown_handler),
         (("POST",), "/api/runs/{run_id}/commits", api_run_commits_upload_handler),
         (("GET",), "/api/runs/{run_id}/commits", api_run_commits_get_handler),
+        (("GET", "POST"), "/api/runs/{run_id}/kpis", api_run_kpis_handler),
+        (("GET",), "/api/kpis/catalog", api_kpi_catalog_handler),
+        (("GET",), "/api/kpis/dimension-options", api_kpi_dimension_options_handler),
+        (("GET",), "/api/kpis/metrics", api_kpi_metrics_handler),
+        (("GET",), "/api/kpis/runs", api_kpi_runs_handler),
+        (("GET",), "/api/kpis/source-options", api_kpi_source_options_handler),
+        (("GET",), "/api/kpis/series", api_kpi_series_handler),
+        (("GET",), "/api/kpis/history", api_kpi_history_handler),
         (("GET",), "/api/runs/{run_id}/commit-baselines", api_run_commit_baselines_handler),
         (("POST",), "/api/runs/{run_id}/analyze", api_trigger_analysis_handler),
         (("GET",), "/api/runs/{run_id}/analysis", api_analysis_status_handler),

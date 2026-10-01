@@ -991,6 +991,23 @@ async def target_handler(request):
         return web.Response(status=500, text=f"Error loading Target: {str(e)}")
 
 
+async def target_kpis_handler(request):
+    """Serve the Target-scoped KPI history view."""
+    try:
+        return web.Response(
+            text=render_template(
+                "target_kpis.html",
+                target_key=request.match_info["key"],
+                active_nav="targets",
+            ),
+            content_type="text/html",
+            headers=NO_CACHE_HEADERS,
+        )
+    except Exception as e:
+        logger.error(f"Error in target_kpis_handler: {e}")
+        return web.Response(status=500, text=f"Error loading Target KPIs: {str(e)}")
+
+
 async def target_tool_redirect_handler(request):
     tool = request.match_info["tool"]
     if tool not in ("analyzer", "matrix", "failures"):
@@ -1093,6 +1110,7 @@ def get_routes():
         (("GET",), "/targets", targets_list_handler),
         (("GET",), "/collections", collections_list_handler),
         (("GET",), "/targets/{key}", target_handler),
+        (("GET",), "/targets/{key}/kpis", target_kpis_handler),
         (("GET",), "/collections/{key}", collection_summary_handler),
         (("GET",), "/targets/{key}/{tool}", target_tool_redirect_handler),
         (("GET",), "/collections/{key}/{tool}", collection_tool_redirect_handler),

@@ -184,6 +184,7 @@
 			<div class="target-key">Target key from client: <code>{{ target_key }}</code></div>
 			<div id="page-status" class="status" role="alert"></div>
 			<div class="toolbar">
+				<a class="btn btn-outline-primary btn-sm" href="/targets/{{ target_key | urlencode }}/kpis"><i class="fas fa-chart-simple me-1"></i>KPIs</a>
 				<a class="btn btn-outline-primary btn-sm" href="/targets/{{ target_key }}/analyzer"><i class="fas fa-chart-line me-1"></i>Analyzer</a>
 				<a class="btn btn-outline-primary btn-sm" href="/targets/{{ target_key }}/matrix"><i class="fas fa-table-cells me-1"></i>Matrix</a>
 				<a class="btn btn-outline-primary btn-sm" href="/targets/{{ target_key }}/failures"><i class="fas fa-bug me-1"></i>Failures</a>
