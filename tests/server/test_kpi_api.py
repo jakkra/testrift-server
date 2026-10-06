@@ -76,12 +76,12 @@ async def kpi_db(tmp_path, monkeypatch):
         end_time=None,
         retention_days=None,
         local_run=True,
-        dut="NORA-W36X",
-        target_key="nora-w36x",
+        dut="Device A",
+        target_key="device-a",
         run_name="KPI pilot",
     )
     assert await database.db.insert_test_run(run, {}, {
-        "nut": {"branch": "main", "revision": "abc123"},
+        "test-system": {"branch": "main", "revision": "abc123"},
     })
     test_case = TestCaseData(
         id=0,
@@ -165,7 +165,7 @@ async def test_run_catalog_and_series_reads_filter_and_paginate(kpi_db):
     assert len(run_json["data"]) == 1
 
     catalog = await api_kpi_catalog_handler(Request("GET", query={
-        "target": "nora-w36x",
+        "target": "device-a",
         "metric_key": "file_download.rx_throughput",
         "unit": "bps",
         "dimension.file_size_bytes": "1000000",
@@ -194,7 +194,7 @@ async def test_kpi_dimension_options_are_distinct_filtered_and_typed(kpi_db):
 
     assert (await api_run_kpis_handler(_request(_payload()))).status == 201
     response = await api_kpi_dimension_options_handler(Request("GET", query={
-        "target": "nora-w36x",
+        "target": "device-a",
         "metric_key": "file_download.rx_throughput",
         "unit": "bps",
     }))
@@ -207,7 +207,7 @@ async def test_kpi_dimension_options_are_distinct_filtered_and_typed(kpi_db):
     assert options["protocol"] == ["TCP"]
 
     filtered = await api_kpi_dimension_options_handler(Request("GET", query={
-        "target": "nora-w36x",
+        "target": "device-a",
         "metric_key": "file_download.rx_throughput",
         "unit": "bps",
         "dimension.tls": "false",
@@ -226,7 +226,7 @@ async def test_metric_run_list_returns_only_matching_runs(kpi_db):
 
     assert (await api_run_kpis_handler(_request(_payload()))).status == 201
     response = await api_kpi_runs_handler(Request("GET", query={
-        "target": "nora-w36x",
+        "target": "device-a",
         "metric_key": "file_download.rx_throughput",
         "unit": "bps",
     }))
@@ -240,7 +240,7 @@ async def test_metric_run_list_returns_only_matching_runs(kpi_db):
     assert run["sample_count"] == 2
     assert run["status"] == "running"
 
-    missing_filter = await api_kpi_runs_handler(Request("GET", query={"target": "nora-w36x"}))
+    missing_filter = await api_kpi_runs_handler(Request("GET", query={"target": "device-a"}))
     assert missing_filter.status == 400
 
 
@@ -254,7 +254,7 @@ async def test_kpi_source_options_and_history_filter_build_revision(kpi_db):
 
     assert (await api_run_kpis_handler(_request(_payload()))).status == 201
     base_query = {
-        "target": "nora-w36x",
+        "target": "device-a",
         "metric_key": "file_download.rx_throughput",
         "unit": "bps",
     }
@@ -262,11 +262,11 @@ async def test_kpi_source_options_and_history_filter_build_revision(kpi_db):
     option_body = json.loads(options.text)
     assert options.status == 200
     assert option_body["pagination"]["count"] == 1
-    assert option_body["data"] == [{"source_role": "nut", "branch": "main", "revision": "abc123"}]
+    assert option_body["data"] == [{"source_role": "test-system", "branch": "main", "revision": "abc123"}]
 
     filtered = await api_kpi_history_handler(Request("GET", query={
         **base_query,
-        "source_role": "nut",
+        "source_role": "test-system",
         "source_branch": "main",
         "source_revision": "abc123",
     }))
@@ -287,7 +287,7 @@ async def test_kpi_history_lists_testcases_and_filters_selected_series_by_date(k
 
     assert (await api_run_kpis_handler(_request(_payload()))).status == 201
     base_query = {
-        "target": "nora-w36x",
+        "target": "device-a",
         "metric_key": "file_download.rx_throughput",
         "unit": "bps",
         "from": "2026-09-23T00:00:00Z",
@@ -346,23 +346,23 @@ async def test_kpi_history_can_compare_the_same_test_across_targets(kpi_db):
         end_time="2026-09-23T11:05:00Z",
         retention_days=None,
         local_run=True,
-        dut="NORA-B26X",
-        target_key="nora-b26x",
-        run_name="B26 KPI pilot",
+        dut="Device B",
+        target_key="device-b",
+        run_name="Device B KPI pilot",
     )
     assert await kpi_db.insert_test_run(other_run, {}, {})
     assert (await api_run_kpis_handler(_request(_payload(value=820000), other_run.run_id))).status == 201
 
     response = await api_kpi_history_handler(Request("GET", query=QueryParams(
-        "target=nora-w36x&target=nora-b26x&metric_key=file_download.rx_throughput"
+        "target=device-a&target=device-b&metric_key=file_download.rx_throughput"
         "&unit=bps&test_name=NUnitTest.FileDownload.Download_1M"
     )))
 
     body = json.loads(response.text)
     assert response.status == 200
     assert {(point["target_key"], point["value"]) for point in body["data"]} == {
-        ("nora-w36x", 940000),
-        ("nora-b26x", 820000),
+        ("device-a", 940000),
+        ("device-b", 820000),
     }
 
 
@@ -376,7 +376,7 @@ async def test_kpi_history_catalog_and_exact_fixture_group(kpi_db):
         "test_name": "NUnitTest.Other.Download_1M",
     })
     assert (await api_run_kpis_handler(_request(payload))).status == 201
-    query = {"target": "nora-w36x", "metric_key": "file_download.rx_throughput", "unit": "bps"}
+    query = {"target": "device-a", "metric_key": "file_download.rx_throughput", "unit": "bps"}
     catalog = json.loads((await api_kpi_history_handler(Request("GET", query={
         **query, "catalog_only": "1",
     }))).text)
@@ -409,7 +409,7 @@ async def test_kpi_history_all_metric_catalog_preserves_metric_and_zero_values(k
     })
     assert (await api_run_kpis_handler(_request(payload))).status == 201
     response = await api_kpi_history_handler(Request("GET", query={
-        "target": "nora-w36x", "catalog_only": "1",
+        "target": "device-a", "catalog_only": "1",
     }))
     body = json.loads(response.text)
     assert response.status == 200
@@ -420,7 +420,7 @@ async def test_kpi_history_all_metric_catalog_preserves_metric_and_zero_values(k
         ("file_download.rx_throughput", "bps", "NUnitTest.FileDownload.NotInRun", 940100),
         ("throughput.tx_throughput", "bps", "NUnitTest.FileDownload.Download_1M", 0),
     }
-    assert (await api_kpi_history_handler(Request("GET", query={"target": "nora-w36x"}))).status == 400
+    assert (await api_kpi_history_handler(Request("GET", query={"target": "device-a"}))).status == 400
 
 
 @pytest.mark.asyncio
@@ -428,7 +428,7 @@ async def test_metric_catalog_collapses_dimensions_into_metric_unit_pairs(kpi_db
     from testrift_server.api_handlers import api_kpi_metrics_handler, api_run_kpis_handler
 
     assert (await api_run_kpis_handler(_request(_payload()))).status == 201
-    response = await api_kpi_metrics_handler(Request("GET", query={"target": "nora-w36x"}))
+    response = await api_kpi_metrics_handler(Request("GET", query={"target": "device-a"}))
     body = json.loads(response.text)
 
     assert response.status == 200

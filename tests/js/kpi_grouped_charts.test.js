@@ -63,7 +63,7 @@ function installObservers() {
 function installApi() {
   const points = testNames.map((test_name, index) => ({
     run_id: `run-${index}`,
-    target_key: "nora-b27x",
+    target_key: "device-a",
     run_name: `Run ${index}`,
     run_start_time: `2026-09-0${index + 1}T00:00:00Z`,
     test_name,
@@ -75,15 +75,15 @@ function installApi() {
   const peerPoints = points.map((point, index) => ({
     ...point,
     run_id: `peer-run-${index}`,
-    target_key: "nora-b26x",
+    target_key: "device-b",
     value: point.value + 5,
   }));
   window.fetch = jest.fn(async input => {
     const url = new URL(input, window.location.origin);
     if (url.pathname.endsWith("/api/targets")) {
       return response({ data: [
-        { key: "nora-b27x", display_name: "NORA-B27X" },
-        { key: "nora-b26x", display_name: "NORA-B26X" },
+        { key: "device-a", display_name: "Device A" },
+        { key: "device-b", display_name: "Device B" },
       ] });
     }
     if (url.pathname.endsWith("/metrics")) {
@@ -108,7 +108,7 @@ function installApi() {
       });
     }
     if (url.pathname.endsWith("/history")) {
-      const allData = url.searchParams.getAll("target").includes("nora-b26x")
+      const allData = url.searchParams.getAll("target").includes("device-b")
         ? [...points, ...peerPoints]
         : points;
       const selectedTestName = url.searchParams.get("test_name");
@@ -157,7 +157,7 @@ async function loadChart() {
   };
   Object.defineProperty(window, "scrollY", { configurable: true, get: () => simulatedScrollY });
   window.scrollTo = jest.fn((x, y) => { simulatedScrollY = y; });
-  window.KPI_TARGET = "nora-b27x";
+  window.KPI_TARGET = "device-a";
   window.HTMLElement.prototype.scrollIntoView = function (options) {
     scrollRequests.push({ element: this, options });
   };
@@ -270,7 +270,7 @@ describe("KPI grouped chart interactions", () => {
     const compatible = document.getElementById("kpi-compare-all");
     compatible.click();
     await waitFor(() => [...dialog.querySelectorAll(".kpi-comparison-target input")]
-      .some(input => input.value === "nora-b26x" && input.checked));
+      .some(input => input.value === "device-b" && input.checked));
     expect(charts).toHaveLength(initialChartCount);
 
     document.getElementById("kpi-compare-apply").click();
@@ -289,7 +289,7 @@ describe("KPI grouped chart interactions", () => {
     expect(historyRequests.some(url => url.searchParams.get("metric_key") === "latency.average"
       && url.searchParams.get("unit") === "ms"
       && url.searchParams.get("test_name") === testNames[0]
-      && url.searchParams.getAll("target").includes("nora-b26x"))).toBe(true);
+      && url.searchParams.getAll("target").includes("device-b"))).toBe(true);
 
     document.querySelector(".kpi-clear-comparison").click();
     await waitFor(() => !document.querySelector(".kpi-clear-comparison")
@@ -308,7 +308,7 @@ describe("KPI grouped chart interactions", () => {
     await waitFor(() => legend.querySelector(".kpi-series-compare"));
     legend.querySelector(".kpi-series-compare").click();
     const peer = [...document.querySelectorAll(".kpi-comparison-target input")]
-      .find(input => input.value === "nora-b26x");
+      .find(input => input.value === "device-b");
     peer.checked = true;
     peer.dispatchEvent(new Event("change"));
     expect(charts).toHaveLength(initialChartCount);
@@ -318,8 +318,8 @@ describe("KPI grouped chart interactions", () => {
       && charts.at(-1).options.series.length === 2);
 
     expect(charts.at(-1).options.series.map(series => series.name)).toEqual([
-      "NORA-B27X · TestAlpha",
-      "NORA-B26X · TestAlpha",
+      "Device A · TestAlpha",
+      "Device B · TestAlpha",
     ]);
   });
 });
