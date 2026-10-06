@@ -60,16 +60,16 @@ function installObservers() {
   };
 }
 
-function installApi() {
-  const points = testNames.map((test_name, index) => ({
+function installApi({ names = testNames, value = 10, maxAbsValue = 11, pageSize = 500 } = {}) {
+  const points = names.map((test_name, index) => ({
     run_id: `run-${index}`,
     target_key: "device-a",
     run_name: `Run ${index}`,
     run_start_time: `2026-09-0${index + 1}T00:00:00Z`,
     test_name,
-    value: 10 + index,
-    minimum: 9 + index,
-    maximum: 11 + index,
+    value: value + index,
+    minimum: value - 1 + index,
+    maximum: value + 1 + index,
     sample_count: 1,
   }));
   const peerPoints = points.map((point, index) => ({
@@ -97,14 +97,17 @@ function installApi() {
       return response({ data: [], pagination: { count: 0 } });
     }
     if (url.pathname.endsWith("/history") && url.searchParams.has("catalog_only")) {
-      return response({
-        testcases: testNames.map(test_name => ({
+      const testcases = names.map(test_name => ({
           test_name,
           metric_key: "latency.average",
           unit: "ms",
           sample_count: 1,
-          max_abs_value: 11,
-        })),
+          max_abs_value: maxAbsValue,
+        }));
+      const offset = Number(url.searchParams.get("offset") || 0);
+      return response({
+        testcases: testcases.slice(offset, offset + pageSize),
+        pagination: { count: testcases.length },
       });
     }
     if (url.pathname.endsWith("/history")) {
@@ -113,17 +116,19 @@ function installApi() {
         : points;
       const selectedTestName = url.searchParams.get("test_name");
       const data = allData.filter(point => !selectedTestName || point.test_name === selectedTestName);
+      const offset = Number(url.searchParams.get("offset") || 0);
       return response({
         selected_test_name: selectedTestName,
-        series_test_names: selectedTestName ? [selectedTestName] : testNames,
-        data,
+        series_test_names: selectedTestName ? [selectedTestName] : names,
+        data: data.slice(offset, offset + pageSize),
+        pagination: { count: data.length },
       });
     }
     throw new Error(`Unexpected API request: ${url}`);
   });
 }
 
-async function loadChart() {
+async function loadChart(apiOptions) {
   document.body.innerHTML = `
     <select id="kpi-metric"></select>
     <select id="kpi-testcase"></select>
@@ -163,7 +168,7 @@ async function loadChart() {
   };
   installObservers();
   const charts = installChartMocks();
-  installApi();
+  installApi(apiOptions);
   window.Fuse = require("fuse.js");
   window.eval(PICKER_SOURCE);
   window.eval(SOURCE);
@@ -192,6 +197,34 @@ describe("KPI grouped chart interactions", () => {
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  test("catalog and history requests collect every page", async () => {
+    const { chart } = await loadChart({ pageSize: 1 });
+    expect(chart.options.series).toHaveLength(2);
+    expect(chart.options.series.flatMap(series => series.data)).toHaveLength(2);
+    expect(window.fetch.mock.calls.filter(([url]) => url.includes("offset=1"))).toHaveLength(2);
+  });
+
+  test("zero-only metrics remain visible in the all-metrics overview", async () => {
+    const { chart } = await loadChart({ names: ["Checks.Errors"], value: 0, maxAbsValue: 0 });
+    expect(chart.options.series[0].data[0].point.value).toBe(0);
+    expect(document.querySelectorAll(".kpi-chart-section")).toHaveLength(1);
+  });
+
+  test("signed metrics are not clipped at zero", async () => {
+    const { chart } = await loadChart({ value: -70 });
+    expect(chart.options.series[0].data[0].point.value).toBe(-70);
+    expect(chart.options.yAxis.min).toBeUndefined();
+  });
+
+  test("unqualified and single-level test groups have readable labels", async () => {
+    await loadChart({ names: ["login_latency", "Checks.Errors"] });
+    expect(document.getElementById("kpi-plots").textContent).not.toContain("undefined");
+    expect(document.getElementById("kpi-testcase").textContent).toContain("Ungrouped");
+    expect(document.getElementById("kpi-testcase").textContent).toContain("login_latency");
+    expect(window.fetch.mock.calls.some(([url]) => new URL(url, window.location.origin)
+      .searchParams.get("test_group") === "")).toBe(true);
+  });
 
   test("seven-day range changes request bounds without changing the default", async () => {
     await loadChart();
@@ -249,8 +282,8 @@ describe("KPI grouped chart interactions", () => {
     expect(legend.querySelector('[aria-pressed="true"]').title).toBe(testNames[1]);
   });
 
-  test("comparing a focused sidebar series stages targets and clears back to the browse view", async () => {
-    const { charts, legend } = await loadChart();
+  test("comparison finds targets on later pages and clears back to the browse view", async () => {
+    const { charts, legend } = await loadChart({ pageSize: 1 });
     const initialChartCount = charts.length;
     const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
     jest.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
@@ -289,6 +322,7 @@ describe("KPI grouped chart interactions", () => {
     expect(historyRequests.some(url => url.searchParams.get("metric_key") === "latency.average"
       && url.searchParams.get("unit") === "ms"
       && url.searchParams.get("test_name") === testNames[0]
+      && url.searchParams.get("offset") === "1"
       && url.searchParams.getAll("target").includes("device-b"))).toBe(true);
 
     document.querySelector(".kpi-clear-comparison").click();
@@ -301,7 +335,7 @@ describe("KPI grouped chart interactions", () => {
     expect(window.scrollTo).toHaveBeenCalledTimes(2);
   });
 
-  test("comparison dialog applies selected products without reloading on checkbox changes", async () => {
+  test("comparison dialog applies selected targets without reloading on checkbox changes", async () => {
     const { charts, legend } = await loadChart();
     const initialChartCount = charts.length;
     legend.querySelector(`[data-test-name="${testNames[0]}"]`).click();

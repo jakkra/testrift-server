@@ -48,6 +48,7 @@ testrift_server = [
   "static/*.js",
   "static/*.css",
   "static/*.json",
+  "static/*.txt",
 ]
 
 

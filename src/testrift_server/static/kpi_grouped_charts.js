@@ -92,6 +92,22 @@
     return result;
   }
 
+  async function fetchHistory(params, signal) {
+    const field = params.catalog_only === "1" ? "testcases" : "data";
+    const items = [];
+    let offset = 0;
+    let result;
+    do {
+      const page = await fetchJson("/api/kpis/history", { ...params, limit: "500", offset: String(offset) }, signal);
+      if (!result) result = page;
+      items.push(...page[field]);
+      offset += page[field].length;
+      if (!page.pagination || offset >= page.pagination.count) break;
+      if (!page[field].length || offset > 1000000) throw new Error("History is too large; select a shorter date range.");
+    } while (true);
+    return { ...result, [field]: items };
+  }
+
   function selectedKpiFilters() {
     const params = {};
     dimensionFiltersElement.querySelectorAll("select[data-filter-name]").forEach(select => {
@@ -116,7 +132,7 @@
 
   function updateComparisonNote(text) {
     const selectedCount = comparisonDraft?.targetKeys.size || 0;
-    comparisonNote.textContent = text || `${selectedCount} comparison product${selectedCount === 1 ? "" : "s"} selected. ${targetLabel(window.KPI_TARGET)} is included as the baseline.`;
+    comparisonNote.textContent = text || `${selectedCount} comparison target${selectedCount === 1 ? "" : "s"} selected. ${targetLabel(window.KPI_TARGET)} is included as the baseline.`;
   }
 
   function renderComparisonTargets() {
@@ -155,7 +171,7 @@
     const [metric_key, unit] = draft.metricValue.split("\t");
     compareAllButton.disabled = true;
     try {
-      const result = await fetchJson("/api/kpis/history", {
+      const result = await fetchHistory({
         target: targetKeys,
         metric_key,
         unit,
@@ -168,10 +184,10 @@
         .filter(key => key && key !== window.KPI_TARGET));
       renderComparisonTargets();
       updateComparisonNote(draft.targetKeys.size
-        ? `${draft.targetKeys.size} compatible product${draft.targetKeys.size === 1 ? "" : "s"} selected.`
+        ? `${draft.targetKeys.size} compatible target${draft.targetKeys.size === 1 ? "" : "s"} selected.`
         : "No other targets have this metric and test in the selected range.");
     } catch (error) {
-      if (comparisonDraft === draft) updateComparisonNote(error.message || "Unable to find compatible products.");
+      if (comparisonDraft === draft) updateComparisonNote(error.message || "Unable to find compatible targets.");
     } finally {
       if (comparisonDraft === draft) compareAllButton.disabled = false;
     }
@@ -258,14 +274,16 @@
   }
 
   function groupName(testName) {
-    return testName.slice(0, testName.lastIndexOf("."));
+    const separator = testName.lastIndexOf(".");
+    return separator < 0 ? "" : testName.slice(0, separator);
   }
 
   function groupLabel(group) {
+    if (!group) return "Ungrouped";
     const parts = group.split(".");
     const family = parts.at(-1);
     const parent = parts.at(-2);
-    return parent === family ? family : `${parent} · ${family}`;
+    return !parent || parent === family ? family : `${parent} · ${family}`;
   }
 
   function buildPathTree(items) {
@@ -478,14 +496,14 @@
     const runCount = new Set(visiblePoints.map(point => point.run_id)).size;
     const measurementCount = visiblePoints.reduce((count, point) => count + point.sample_count, 0);
     panel.summary.textContent = comparedTargetKeys.size
-      ? `${visibleTestCount} test${visibleTestCount === 1 ? "" : "s"} across ${visibleTargetCount} product${visibleTargetCount === 1 ? "" : "s"} · ${runCount.toLocaleString()} runs · ${measurementCount.toLocaleString()} measurements`
+      ? `${visibleTestCount} test${visibleTestCount === 1 ? "" : "s"} across ${visibleTargetCount} target${visibleTargetCount === 1 ? "" : "s"} · ${runCount.toLocaleString()} runs · ${measurementCount.toLocaleString()} measurements`
       : `${visibleTestCount} test${visibleTestCount === 1 ? "" : "s"} · ${runCount.toLocaleString()} runs · ${measurementCount.toLocaleString()} measurements`;
     const legendScrollTop = panel.legend.scrollTop;
     panel.legend.replaceChildren();
     if (panel.focusedSeriesKey || (!comparedTargetKeys.size && selectedTestName)) {
       const back = document.createElement("button");
       back.type = "button";
-      back.textContent = comparedTargetKeys.size ? "All selected products for this test" : "All tests in this family";
+      back.textContent = comparedTargetKeys.size ? "All selected targets for this test" : "All tests in this family";
       back.addEventListener("click", () => {
         if (panel.focusedSeriesKey) {
           renderPlot(panel, { ...panel.result, focused_series_key: "" });
@@ -527,8 +545,8 @@
         compare.type = "button";
         compare.className = "kpi-series-compare";
         compare.textContent = "Compare";
-        compare.title = "Compare this test across products";
-        compare.setAttribute("aria-label", `Compare ${series.testName} across products`);
+        compare.title = "Compare this test across targets";
+        compare.setAttribute("aria-label", `Compare ${series.testName} across targets`);
         compare.addEventListener("click", () => startComparison(panel, series));
         entry.appendChild(compare);
       }
@@ -565,7 +583,7 @@
       }),
       grid: { top: 28, left: 10, right: 20, bottom: 74, containLabel: true },
       xAxis: { type: "time", axisLabel: { color: "#54656a" }, splitLine: { show: true, lineStyle: { color: "#e7eeec" } } },
-      yAxis: { type: "value", min: 0, name: scale.label, nameTextStyle: { color: "#54656a" },
+      yAxis: { type: "value", name: scale.label, nameTextStyle: { color: "#54656a" },
         axisLabel: { color: "#54656a", formatter: value => (value / scale.divisor).toLocaleString() },
         splitLine: { lineStyle: { color: "#e2e9e6" } } },
       tooltip: { trigger: "axis", confine: true,
@@ -607,7 +625,7 @@
       const params = { target: selectedTargetKeys(), metric_key: panel.key, unit: panel.unit, ...dateRange(), ...selectedKpiFilters() };
       if (testcaseSelect.value) params.test_name = testcaseSelect.value;
       else params.test_group = panel.group;
-      fetchJson("/api/kpis/history", params, controller.signal).then(result => {
+      fetchHistory(params, controller.signal).then(result => {
         if (sequence !== generation) return;
         panel.loading.textContent = "";
         renderPlot(panel, result);
@@ -716,7 +734,7 @@
       ]);
       if (sequence !== generation) return;
       renderDimensionFilters(dimensionOptions, sourceRows);
-      const result = await fetchJson("/api/kpis/history", {
+      const result = await fetchHistory({
         target: selectedTargetKeys(), ...dateRange(), ...selectedKpiFilters(), catalog_only: "1",
       }, controller.signal);
       if (sequence !== generation) return;
@@ -737,7 +755,7 @@
       testcaseSelect.disabled = !testNames.length;
       testcasePicker.refresh();
       if (comparedTargetKeys.size && (!metricSelect.value || !testcaseSelect.value)) {
-        setStatus("Choose one metric and one test case to compare products.");
+        setStatus("Choose one metric and one test case to compare targets.");
         return;
       }
       const groups = new Map();
@@ -749,7 +767,6 @@
         groups.get(panelId).tests.push(test);
       });
       const ordered = [...groups.values()]
-        .filter(panel => metricSelect.value || panel.tests.some(test => test.max_abs_value !== 0))
         .sort((left, right) => left.group.localeCompare(right.group) || left.metricValue.localeCompare(right.metricValue));
       jumpSelect.replaceChildren();
       observer = new IntersectionObserver(entries => {

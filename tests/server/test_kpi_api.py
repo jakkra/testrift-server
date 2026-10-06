@@ -443,3 +443,106 @@ async def test_invalid_kpi_dimension_filter_returns_validation_error(kpi_db):
 
     response = await api_kpi_catalog_handler(Request("GET", query={"dimension.bad.key": "x"}))
     assert response.status == 400
+
+
+@pytest.mark.asyncio
+async def test_large_dimension_numbers_are_validation_errors(kpi_db):
+    from testrift_server.api_handlers import api_kpi_catalog_handler, api_run_kpis_handler
+
+    payload = _payload(file_size=10 ** 400)
+    assert (await api_run_kpis_handler(_request(payload))).status == 400
+    response = await api_kpi_catalog_handler(Request("GET", query={"dimension.size": str(10 ** 400)}))
+    assert response.status == 400
+
+
+@pytest.mark.asyncio
+async def test_history_and_catalog_pagination_preserve_total_summary(kpi_db):
+    from testrift_server.api_handlers import api_kpi_history_handler, api_run_kpis_handler
+
+    assert (await api_run_kpis_handler(_request(_payload()))).status == 201
+    query = {"target": "device-a", "metric_key": "file_download.rx_throughput", "unit": "bps", "limit": "1"}
+    pages = []
+    for offset in (0, 1, 2):
+        body = json.loads((await api_kpi_history_handler(Request("GET", query={**query, "offset": str(offset)}))).text)
+        assert body["pagination"]["count"] == 2
+        assert body["summary"] == {"run_count": 1, "sample_count": 2}
+        assert len(body["data"]) == (1 if offset < 2 else 0)
+        pages.extend(body["data"])
+    assert len({point["test_name"] for point in pages}) == 2
+    for catalog_query in (query, {"target": "device-a", "limit": "1"}):
+        body = json.loads((await api_kpi_history_handler(Request("GET", query={
+            **catalog_query, "catalog_only": "1", "offset": "1",
+        }))).text)
+        assert body["pagination"]["count"] == 2
+        assert len(body["testcases"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_history_groups_unqualified_names_without_mixing_qualified_tests(kpi_db):
+    from testrift_server.api_handlers import api_kpi_history_handler, api_run_kpis_handler
+
+    payload = _payload()
+    payload["_samples"][0]["test_name"] = "login_latency"
+    assert (await api_run_kpis_handler(_request(payload))).status == 201
+    body = json.loads((await api_kpi_history_handler(Request("GET", query={
+        "target": "device-a", "metric_key": "file_download.rx_throughput", "unit": "bps", "test_group": "",
+    }))).text)
+    assert body["series_test_names"] == ["login_latency"]
+    assert len(body["data"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_offset_timestamps_are_normalized_and_old_samples_order_chronologically(kpi_db):
+    from testrift_server.api_handlers import api_run_kpis_handler
+
+    payload = _payload()
+    payload["_samples"][0]["timestamp_utc"] = "2026-09-23T10:00:00+02:00"
+    payload["_samples"][1]["timestamp_utc"] = "2026-09-23T09:00:00Z"
+    assert (await api_run_kpis_handler(_request(payload))).status == 201
+    rows, _ = await kpi_db.get_kpi_samples({})
+    assert rows[0]["sample_time"] == "2026-09-23T08:00:00Z"
+    async with kpi_db.get_connection() as connection:
+        await connection.execute("UPDATE kpi_samples SET sample_time = ? WHERE ordinal = 0", ("2026-09-23T10:00:00+02:00",))
+        await connection.commit()
+    rows, _ = await kpi_db.get_kpi_samples({})
+    assert rows[0]["ordinal"] == 0
+    metrics = await kpi_db.get_kpi_metrics({})
+    assert metrics[0]["first_sample"] == "2026-09-23T08:00:00.000Z"
+    assert metrics[0]["last_sample"] == "2026-09-23T09:00:00.000Z"
+
+
+@pytest.mark.asyncio
+async def test_history_mean_combines_only_dimensions_matching_the_filter(kpi_db):
+    from testrift_server.api_handlers import api_kpi_history_handler, api_run_kpis_handler
+
+    payload = _payload(value=10)
+    payload["_samples"][1].update(test_name=payload["_samples"][0]["test_name"], value=30)
+    assert (await api_run_kpis_handler(_request(payload))).status == 201
+    query = {"target": "device-a", "metric_key": "file_download.rx_throughput", "unit": "bps"}
+    body = json.loads((await api_kpi_history_handler(Request("GET", query=query))).text)
+    assert body["data"][0]["value"] == 20
+    assert body["data"][0]["minimum"] == 10
+    assert body["data"][0]["maximum"] == 30
+    filtered = json.loads((await api_kpi_history_handler(Request("GET", query={**query, "dimension.tls": "false"}))).text)
+    assert filtered["data"][0]["value"] == 10
+
+
+@pytest.mark.asyncio
+async def test_initialization_preserves_existing_kpis_and_adds_tables_to_supported_schema(kpi_db):
+    from testrift_server.api_handlers import api_run_kpis_handler
+
+    assert (await api_run_kpis_handler(_request(_payload()))).status == 201
+    reopened = database.TestResultsDatabase(kpi_db.db_path)
+    await reopened.initialize()
+    _, count = await reopened.get_kpi_samples({})
+    assert count == 2
+    async with reopened.get_connection() as connection:
+        await connection.execute("DROP TABLE kpi_samples")
+        await connection.execute("DROP TABLE kpi_batches")
+        await connection.execute("DELETE FROM schema_migrations WHERE version = 1")
+        await connection.commit()
+    upgraded = database.TestResultsDatabase(kpi_db.db_path)
+    await upgraded.initialize()
+    assert await upgraded.get_test_run_by_id("pilot-run-1") is not None
+    _, count = await upgraded.get_kpi_samples({})
+    assert count == 0

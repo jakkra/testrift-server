@@ -113,6 +113,8 @@ def _validate_kpi_payload(payload):
             if isinstance(dimension, bool):
                 continue
             if isinstance(dimension, (int, float)):
+                if isinstance(dimension, int) and not -(2 ** 63) <= dimension < 2 ** 63:
+                    raise ValueError(f"_samples[{index}] has an out-of-range integer dimension")
                 if not math.isfinite(float(dimension)):
                     raise ValueError(f"_samples[{index}] has a non-finite dimension")
             elif not isinstance(dimension, str) or len(dimension) > 256:
@@ -128,6 +130,10 @@ def _validate_kpi_payload(payload):
                 raise ValueError(f"_samples[{index}].timestamp_utc must be ISO-8601")
             if parsed_timestamp.tzinfo is None:
                 raise ValueError(f"_samples[{index}].timestamp_utc must include a timezone")
+            try:
+                timestamp = parsed_timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            except (OverflowError, ValueError):
+                raise ValueError(f"_samples[{index}].timestamp_utc is out of range")
 
         normalized.append({
             "metric_key": metric_key,
@@ -202,6 +208,13 @@ def _kpi_read_filters(request, require_series=False):
             except (json.JSONDecodeError, TypeError):
                 dimensions[key] = value
     if dimensions:
+        for dimension in dimensions.values():
+            if isinstance(dimension, int) and not isinstance(dimension, bool) and not -(2 ** 63) <= dimension < 2 ** 63:
+                raise ValueError("Integer dimension filters must fit in signed 64 bits")
+            if isinstance(dimension, float) and not math.isfinite(dimension):
+                raise ValueError("Numeric dimension filters must be finite")
+            if not isinstance(dimension, (str, int, float, bool)):
+                raise ValueError("Dimension filters must be strings, numbers, or booleans")
         filters["dimensions"] = dimensions
 
     try:
@@ -361,7 +374,7 @@ async def api_kpi_series_handler(request):
 async def api_kpi_history_handler(request):
     try:
         catalog_only = request.query.get("catalog_only") == "1"
-        filters, _, _ = _kpi_read_filters(request, require_series=not catalog_only)
+        filters, limit, offset = _kpi_read_filters(request, require_series=not catalog_only)
         if not filters.get("target_key") and not filters.get("target_keys"):
             raise ValueError("target is required")
         test_name = request.query.get("test_name")
@@ -371,12 +384,12 @@ async def api_kpi_history_handler(request):
             filters["test_name"] = test_name
         test_group = request.query.get("test_group")
         if test_group is not None:
-            if not test_group.strip() or len(test_group) > 1024 or test_name is not None:
-                raise ValueError("test_group must contain 1..1024 characters and cannot be combined with test_name")
+            if (test_group and not test_group.strip()) or len(test_group) > 1024 or test_name is not None:
+                raise ValueError("test_group must contain at most 1024 characters and cannot be combined with test_name")
             filters["test_group"] = test_group
         if catalog_only:
             filters["catalog_only"] = True
-        result = await database.db.get_kpi_history(filters)
+        result = await database.db.get_kpi_history(filters, limit, offset)
         return web.json_response({"success": True, **result})
     except ValueError as error:
         return _validation_error(error)

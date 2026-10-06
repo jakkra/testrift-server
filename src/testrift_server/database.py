@@ -1309,13 +1309,13 @@ class TestResultsDatabase:
             )
             total = (await count_cursor.fetchone())[0]
             cursor = await db.execute(
-                query + " ORDER BY COALESCE(ks.sample_time, tr.start_time), ks.run_id, ks.ordinal LIMIT ? OFFSET ?",
+                query + " ORDER BY julianday(COALESCE(ks.sample_time, tr.start_time)), ks.run_id, ks.ordinal LIMIT ? OFFSET ?",
                 (*params, limit, offset),
             )
             columns = [column[0] for column in cursor.description]
             return [dict(zip(columns, row)) for row in await cursor.fetchall()], total
 
-    async def get_kpi_history(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+    async def get_kpi_history(self, filters: Dict[str, Any], limit: int = 100, offset: int = 0) -> Dict[str, Any]:
         """Return testcase choices and per-run aggregates for a family or one test."""
         testcase_filters = {key: value for key, value in filters.items()
                             if key not in ("test_name", "test_group", "catalog_only")}
@@ -1324,7 +1324,7 @@ class TestResultsDatabase:
             query = f"""SELECT ks.metric_key, ks.unit, ks.test_name,
                                COUNT(*) AS sample_count,
                                COUNT(DISTINCT ks.run_id) AS run_count,
-                               MAX(COALESCE(ks.sample_time, tr.start_time)) AS last_sample,
+                               strftime('%Y-%m-%dT%H:%M:%fZ', MAX(julianday(COALESCE(ks.sample_time, tr.start_time)))) AS last_sample,
                                MAX(ABS(ks.value)) AS max_abs_value
                         FROM kpi_samples ks
                         JOIN test_runs tr ON tr.run_id = ks.run_id
@@ -1332,16 +1332,19 @@ class TestResultsDatabase:
                         GROUP BY ks.metric_key, ks.unit, ks.test_name
                         ORDER BY ks.metric_key, ks.unit, last_sample DESC, ks.test_name"""
             async with self.get_connection() as db:
-                cursor = await db.execute(query, testcase_params)
+                count_cursor = await db.execute(f"SELECT COUNT(*) FROM ({query})", testcase_params)
+                total = (await count_cursor.fetchone())[0]
+                cursor = await db.execute(query + " LIMIT ? OFFSET ?", (*testcase_params, limit, offset))
                 columns = [column[0] for column in cursor.description]
                 testcases = [dict(zip(columns, row)) for row in await cursor.fetchall()]
             return {"testcases": testcases, "selected_test_name": None,
                     "series_test_names": [], "data": [],
+                    "pagination": {"limit": limit, "offset": offset, "count": total},
                     "summary": {"run_count": 0, "sample_count": 0}}
         testcase_query = f"""SELECT ks.test_name,
                                     COUNT(*) AS sample_count,
                                     COUNT(DISTINCT ks.run_id) AS run_count,
-                                    MAX(COALESCE(ks.sample_time, tr.start_time)) AS last_sample
+                                    strftime('%Y-%m-%dT%H:%M:%fZ', MAX(julianday(COALESCE(ks.sample_time, tr.start_time)))) AS last_sample
                              FROM kpi_samples ks
                              JOIN test_runs tr ON tr.run_id = ks.run_id
                              WHERE {testcase_where}
@@ -1357,19 +1360,23 @@ class TestResultsDatabase:
             if selected_test_name not in testcase_names:
                 selected_test_name = None
             test_group = filters.get("test_group")
-            if test_group and not any(item["test_name"].rpartition(".")[0] == test_group
+            if test_group is not None and not any(item["test_name"].rpartition(".")[0] == test_group
                                       for item in testcases):
                 raise ValueError("Unknown KPI test group")
             series_test_names = ([selected_test_name] if selected_test_name else
                                  [item["test_name"] for item in testcases
                                   if item["test_name"].rpartition(".")[0] == test_group]
-                                 if test_group else
+                                 if test_group is not None else
                                  [item["test_name"] for item in sorted(
                                      testcases, key=lambda item: (-item["run_count"], item["test_name"])
                                  )[:8]])
 
             points = []
             sample_count = 0
+            run_count = 0
+            total = len(testcases) if filters.get("catalog_only") else 0
+            if filters.get("catalog_only"):
+                testcases = testcases[offset:offset + limit]
             if series_test_names and not filters.get("catalog_only"):
                 where, params = self._kpi_filter_sql(testcase_filters)
                 placeholders = ", ".join("?" for _ in series_test_names)
@@ -1388,18 +1395,24 @@ class TestResultsDatabase:
                         LEFT JOIN test_cases tc ON tc.id = ks.test_case_id
                             WHERE {where} AND ks.test_name IN ({placeholders})
                             GROUP BY ks.run_id, tr.target_key, tr.run_name, tr.start_time, ks.test_name
-                            ORDER BY tr.start_time, ks.run_id, ks.test_name"""
-                cursor = await db.execute(query, (*params, *series_test_names))
+                            ORDER BY julianday(tr.start_time), ks.run_id, ks.test_name"""
+                aggregate_params = (*params, *series_test_names)
+                summary_cursor = await db.execute(
+                    f"SELECT COUNT(*), COUNT(DISTINCT run_id), COALESCE(SUM(sample_count), 0) FROM ({query})",
+                    aggregate_params,
+                )
+                total, run_count, sample_count = await summary_cursor.fetchone()
+                cursor = await db.execute(query + " LIMIT ? OFFSET ?", (*aggregate_params, limit, offset))
                 columns = [column[0] for column in cursor.description]
                 points = [dict(zip(columns, row)) for row in await cursor.fetchall()]
-                sample_count = sum(point["sample_count"] for point in points)
 
         return {
             "testcases": testcases,
             "selected_test_name": selected_test_name,
             "series_test_names": series_test_names,
             "data": points,
-            "summary": {"run_count": len({point["run_id"] for point in points}), "sample_count": sample_count},
+            "pagination": {"limit": limit, "offset": offset, "count": total},
+            "summary": {"run_count": run_count, "sample_count": sample_count},
         }
 
     async def get_kpi_catalog(
@@ -1411,8 +1424,8 @@ class TestResultsDatabase:
         where, params = self._kpi_filter_sql(filters)
         query = f"""SELECT ks.metric_key, ks.unit, tr.target_key, ks.dimensions_json,
                           COUNT(*) AS sample_count,
-                          MIN(COALESCE(ks.sample_time, tr.start_time)) AS first_sample,
-                          MAX(COALESCE(ks.sample_time, tr.start_time)) AS last_sample
+                          strftime('%Y-%m-%dT%H:%M:%fZ', MIN(julianday(COALESCE(ks.sample_time, tr.start_time)))) AS first_sample,
+                          strftime('%Y-%m-%dT%H:%M:%fZ', MAX(julianday(COALESCE(ks.sample_time, tr.start_time)))) AS last_sample
                    FROM kpi_samples ks
                    JOIN test_runs tr ON tr.run_id = ks.run_id
                    WHERE {where}
@@ -1465,8 +1478,8 @@ class TestResultsDatabase:
         where, params = self._kpi_filter_sql(filters)
         query = f"""SELECT ks.metric_key, ks.unit, tr.target_key,
                             COUNT(*) AS sample_count,
-                            MIN(COALESCE(ks.sample_time, tr.start_time)) AS first_sample,
-                            MAX(COALESCE(ks.sample_time, tr.start_time)) AS last_sample
+                            strftime('%Y-%m-%dT%H:%M:%fZ', MIN(julianday(COALESCE(ks.sample_time, tr.start_time)))) AS first_sample,
+                            strftime('%Y-%m-%dT%H:%M:%fZ', MAX(julianday(COALESCE(ks.sample_time, tr.start_time)))) AS last_sample
                      FROM kpi_samples ks
                      JOIN test_runs tr ON tr.run_id = ks.run_id
                      WHERE {where}
@@ -1517,7 +1530,7 @@ class TestResultsDatabase:
             count_cursor = await db.execute(f"SELECT COUNT(*) FROM ({query})", params)
             total = (await count_cursor.fetchone())[0]
             cursor = await db.execute(
-                query + " ORDER BY tr.start_time DESC, tr.run_id DESC LIMIT ? OFFSET ?",
+                query + " ORDER BY julianday(tr.start_time) DESC, tr.run_id DESC LIMIT ? OFFSET ?",
                 (*params, limit, offset),
             )
             columns = [column[0] for column in cursor.description]
