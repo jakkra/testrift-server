@@ -492,6 +492,36 @@ async def test_history_groups_unqualified_names_without_mixing_qualified_tests(k
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("test_name, extra_filters", [
+    ("NUnitTest.FileDownload.Missing", {}),
+    ("NUnitTest.FileDownload.Download_1M", {"from": "2026-09-23T10:00:30Z"}),
+    ("NUnitTest.FileDownload.Download_1M", {"dimension.tls": "true"}),
+])
+async def test_explicit_history_test_without_samples_never_falls_back(kpi_db, test_name, extra_filters):
+    from testrift_server.api_handlers import api_kpi_history_handler, api_run_kpis_handler
+
+    assert (await api_run_kpis_handler(_request(_payload()))).status == 201
+    query = {
+        "target": "device-a", "metric_key": "file_download.rx_throughput", "unit": "bps",
+        **extra_filters,
+    }
+    overview_response = await api_kpi_history_handler(Request("GET", query=query))
+    assert overview_response.status == 200
+    overview = json.loads(overview_response.text)
+    assert overview["data"]
+    assert all(point["test_name"] != test_name for point in overview["data"])
+
+    response = await api_kpi_history_handler(Request("GET", query={**query, "test_name": test_name}))
+    assert response.status == 200
+    body = json.loads(response.text)
+    assert body["selected_test_name"] == test_name
+    assert body["series_test_names"] == [test_name]
+    assert body["data"] == []
+    assert body["pagination"]["count"] == 0
+    assert body["summary"] == {"run_count": 0, "sample_count": 0}
+
+
+@pytest.mark.asyncio
 async def test_offset_timestamps_are_normalized_and_old_samples_order_chronologically(kpi_db):
     from testrift_server.api_handlers import api_run_kpis_handler
 

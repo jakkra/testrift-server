@@ -1356,9 +1356,6 @@ class TestResultsDatabase:
             columns = [column[0] for column in cursor.description]
             testcases = [dict(zip(columns, row)) for row in await cursor.fetchall()]
             selected_test_name = filters.get("test_name")
-            testcase_names = {item["test_name"] for item in testcases}
-            if selected_test_name not in testcase_names:
-                selected_test_name = None
             test_group = filters.get("test_group")
             if test_group is not None and not any(item["test_name"].rpartition(".")[0] == test_group
                                       for item in testcases):
