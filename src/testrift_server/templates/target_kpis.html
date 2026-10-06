@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}KPI history · {{ target_key }} · TestRift{% endblock %}
 {% block head %}
-<link href="/static/kpi_dashboard.css?v=12" rel="stylesheet">
+<link href="/static/kpi_dashboard.css?v=13" rel="stylesheet">
 {% endblock %}
 {% block body %}
 <main class="kpi-page" id="kpi-page">
@@ -42,12 +42,14 @@
     <label>Metric
       <select id="kpi-metric" disabled><option>Loading metrics...</option></select>
     </label>
-    <label>Test case
+    <div class="kpi-testcase-control">
+      <label for="kpi-testcase">Test case</label>
       <select id="kpi-testcase" disabled><option>Loading test cases...</option></select>
-    </label>
+    </div>
     <div class="kpi-range-control" role="group" aria-label="History range">
       <span>Range</span>
       <div id="kpi-range" class="kpi-range">
+        <button type="button" data-days="7" aria-pressed="false" title="Last 7 days">7d</button>
         <button type="button" data-days="30" aria-pressed="true" title="Last 30 days">30d</button>
         <button type="button" data-days="90" aria-pressed="false" title="Last 90 days">90d</button>
         <button type="button" data-days="180" aria-pressed="false" title="Last 6 months">6m</button>
@@ -77,5 +79,7 @@
 {% block scripts %}
 <script>window.KPI_TARGET = {{ target_key | tojson }};</script>
 <script src="/static/echarts.min.js" defer></script>
-<script src="/static/kpi_grouped_charts.js?v=24" defer></script>
+<script src="/static/fuse.min.js" defer></script>
+<script src="/static/kpi_testcase_picker.js?v=2" defer></script>
+<script src="/static/kpi_grouped_charts.js?v=25" defer></script>
 {% endblock %}

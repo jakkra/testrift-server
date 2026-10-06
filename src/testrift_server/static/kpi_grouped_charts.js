@@ -3,6 +3,7 @@
 
   const metricSelect = document.getElementById("kpi-metric");
   const testcaseSelect = document.getElementById("kpi-testcase");
+  const testcasePicker = new window.KpiTestcasePicker(testcaseSelect);
   const dimensionFiltersDisclosure = document.getElementById("kpi-filter-disclosure");
   const dimensionFiltersElement = document.getElementById("kpi-dimension-filters");
   const rangeElement = document.getElementById("kpi-range");
@@ -734,6 +735,7 @@
       });
       testcaseSelect.value = testNames.includes(selected) ? selected : "";
       testcaseSelect.disabled = !testNames.length;
+      testcasePicker.refresh();
       if (comparedTargetKeys.size && (!metricSelect.value || !testcaseSelect.value)) {
         setStatus("Choose one metric and one test case to compare products.");
         return;

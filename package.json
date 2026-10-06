@@ -10,6 +10,7 @@
     "jest-environment-jsdom": "^27.5.1"
   },
   "dependencies": {
-    "echarts": "6.1.0"
+    "echarts": "6.1.0",
+    "fuse.js": "7.1.0"
   }
 }

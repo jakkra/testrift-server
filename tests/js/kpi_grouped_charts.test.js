@@ -13,6 +13,7 @@ const SOURCE_PATH = path.join(
   "kpi_grouped_charts.js"
 );
 const SOURCE = fs.readFileSync(SOURCE_PATH, "utf8");
+const PICKER_SOURCE = fs.readFileSync(path.join(path.dirname(SOURCE_PATH), "kpi_testcase_picker.js"), "utf8");
 const testNames = [
   "NUnitTest.Family.TestAlpha",
   "NUnitTest.Family.TestBeta",
@@ -127,7 +128,10 @@ async function loadChart() {
     <select id="kpi-metric"></select>
     <select id="kpi-testcase"></select>
     <details id="kpi-filter-disclosure"><div id="kpi-dimension-filters"></div></details>
-    <div id="kpi-range"><button data-days="30" aria-pressed="true"></button></div>
+    <div id="kpi-range">
+      <button data-days="7" aria-pressed="false"></button>
+      <button data-days="30" aria-pressed="true"></button>
+    </div>
     <div id="kpi-status"></div>
     <div id="kpi-plots"></div>
     <div id="kpi-group-toolbar"><span id="kpi-group-count"></span></div>
@@ -160,6 +164,8 @@ async function loadChart() {
   installObservers();
   const charts = installChartMocks();
   installApi();
+  window.Fuse = require("fuse.js");
+  window.eval(PICKER_SOURCE);
   window.eval(SOURCE);
 
   for (let attempt = 0; attempt < 20 && !charts[0]?.options; attempt += 1) {
@@ -186,6 +192,34 @@ describe("KPI grouped chart interactions", () => {
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  test("seven-day range changes request bounds without changing the default", async () => {
+    await loadChart();
+    expect(document.querySelector('[data-days="30"]').getAttribute("aria-pressed")).toBe("true");
+    window.fetch.mockClear();
+    document.querySelector('[data-days="7"]').click();
+    await waitFor(() => window.fetch.mock.calls.some(([input]) => input.includes("catalog_only")));
+    const [input] = window.fetch.mock.calls.find(([url]) => url.includes("catalog_only"));
+    const params = new URL(input, window.location.origin).searchParams;
+    expect(Date.parse(params.get("to")) - Date.parse(params.get("from"))).toBe(7 * 86400000);
+    expect(document.querySelector('[data-days="7"]').getAttribute("aria-pressed")).toBe("true");
+  });
+
+  test("test-case search only reloads charts when a suggestion is selected", async () => {
+    await loadChart();
+    window.fetch.mockClear();
+    const input = document.getElementById("kpi-testcase-search");
+    input.focus();
+    input.value = "beta family";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(window.fetch).not.toHaveBeenCalled();
+    expect(document.querySelectorAll("#kpi-testcase-options [role=option]")).toHaveLength(1);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await waitFor(() => window.fetch.mock.calls.some(([url]) => url.includes("test_name=")));
+    const [url] = window.fetch.mock.calls.find(([request]) => request.includes("test_name="));
+    expect(new URL(url, window.location.origin).searchParams.get("test_name")).toBe(testNames[1]);
+    expect(input.value).toContain("TestBeta");
+  });
 
   test("clicking a data line focuses its matching test series", async () => {
     const { chart, legend } = await loadChart();
