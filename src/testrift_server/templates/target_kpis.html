@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block title %}KPI history · {{ target_key }} · TestRift{% endblock %}
 {% block head %}
-<link href="/static/kpi_dashboard.css?v=13" rel="stylesheet">
+<link href="/static/kpi_dashboard.css?v=15" rel="stylesheet">
 {% endblock %}
 {% block body %}
-<main class="kpi-page" id="kpi-page">
+<main class="kpi-page app-shell" id="kpi-page">
   <header class="kpi-header">
     <div>
       <p class="kpi-eyebrow">Historical measurements</p>
@@ -81,5 +81,5 @@
 <script src="/static/echarts.min.js" defer></script>
 <script src="/static/fuse.min.js" defer></script>
 <script src="/static/kpi_testcase_picker.js?v=2" defer></script>
-<script src="/static/kpi_grouped_charts.js?v=26" defer></script>
+<script src="/static/kpi_grouped_charts.js?v=27" defer></script>
 {% endblock %}

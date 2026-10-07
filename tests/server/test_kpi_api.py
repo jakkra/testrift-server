@@ -146,6 +146,200 @@ async def test_unknown_run_schema_nan_and_size_are_rejected(kpi_db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("dimension", [
+    pytest.param(10 ** 400, id="float-conversion-overflow"),
+    pytest.param(100000000000000000000, id="sqlite-bind-overflow"),
+    pytest.param(-(2 ** 63) - 1, id="below-int64"),
+    pytest.param(2 ** 63, id="above-int64"),
+    pytest.param(float("nan"), id="nan"),
+    pytest.param(float("inf"), id="infinity"),
+    pytest.param(None, id="null"),
+    pytest.param([], id="array"),
+    pytest.param({}, id="object"),
+    pytest.param("x" * 257, id="long-string"),
+])
+async def test_kpi_upload_rejects_invalid_dimensions(kpi_db, dimension):
+    from testrift_server.api_handlers import api_run_kpis_handler
+
+    payload = _payload()
+    payload["_samples"][0]["dimensions"] = {"boundary": dimension}
+    response = await api_run_kpis_handler(_request(payload))
+
+    assert response.status == 400
+    assert json.loads(response.text)["success"] is False
+    _, count = await kpi_db.get_kpi_samples({})
+    assert count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["", "1protocol", "_protocol", "protocol.name", "\u00e9protocol", "protocol\n"])
+async def test_kpi_upload_rejects_invalid_dimension_names(kpi_db, key):
+    from testrift_server.api_handlers import api_run_kpis_handler
+
+    payload = _payload()
+    payload["_samples"][0]["dimensions"] = {key: "TCP"}
+    response = await api_run_kpis_handler(_request(payload))
+
+    assert response.status == 400
+    assert json.loads(response.text)["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_kpi_upload_rejects_too_many_dimensions(kpi_db):
+    from testrift_server.api_handlers import api_run_kpis_handler
+
+    payload = _payload()
+    payload["_samples"][0]["dimensions"] = {f"key_{index}": index for index in range(33)}
+    response = await api_run_kpis_handler(_request(payload))
+
+    assert response.status == 400
+    assert json.loads(response.text)["success"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value, expected_status", [
+    pytest.param(10 ** 300, 201, id="finite-large-integer"),
+    pytest.param(10 ** 400, 400, id="float-conversion-overflow"),
+])
+async def test_kpi_upload_normalizes_large_integer_samples(kpi_db, value, expected_status):
+    from testrift_server.api_handlers import api_run_kpis_handler
+
+    response = await api_run_kpis_handler(_request(_payload(value=value)))
+    assert response.status == expected_status
+    rows, count = await kpi_db.get_kpi_samples({})
+    assert count == (2 if expected_status == 201 else 0)
+    if expected_status == 201:
+        assert all(type(row["value"]) is float for row in rows)
+        assert all(row["value"] == float(value) for row in rows)
+
+
+@pytest.fixture(params=["catalog", "history", "cross-target-history"])
+def kpi_dimension_reader(request):
+    from testrift_server.api_handlers import api_kpi_catalog_handler, api_kpi_history_handler
+
+    targets = [("target", "device-a")]
+    if request.param == "cross-target-history":
+        targets.append(("target", "device-b"))
+    handler = api_kpi_catalog_handler if request.param == "catalog" else api_kpi_history_handler
+    query = targets + [
+        ("metric_key", "file_download.rx_throughput"),
+        ("unit", "bps"),
+    ]
+    return handler, query
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key, value", [
+    pytest.param("boundary", "[]", id="array"),
+    pytest.param("boundary", "{}", id="object"),
+    pytest.param("boundary", "null", id="null"),
+    pytest.param("boundary", str(10 ** 400), id="huge-integer"),
+    pytest.param("boundary", "100000000000000000000", id="sqlite-bind-overflow"),
+    pytest.param("boundary", str(-(2 ** 63) - 1), id="below-int64"),
+    pytest.param("boundary", str(2 ** 63), id="above-int64"),
+    pytest.param("boundary", "NaN", id="nan"),
+    pytest.param("boundary", "Infinity", id="infinity"),
+    pytest.param("boundary", "-Infinity", id="negative-infinity"),
+    pytest.param("boundary", "1e400", id="float-overflow"),
+    pytest.param("boundary", "x" * 257, id="long-unquoted-string"),
+    pytest.param("boundary", json.dumps("x" * 257), id="long-json-string"),
+    pytest.param("", "TCP", id="empty-name"),
+    pytest.param("1protocol", "TCP", id="numeric-name-prefix"),
+    pytest.param("_protocol", "TCP", id="underscore-name-prefix"),
+    pytest.param("protocol.name", "TCP", id="punctuation-in-name"),
+    pytest.param("\u00e9protocol", "TCP", id="non-ascii-name"),
+    pytest.param("protocol\n", "TCP", id="newline-in-name"),
+])
+async def test_kpi_reads_reject_invalid_dimension_filters(kpi_db, kpi_dimension_reader, key, value):
+    from testrift_server.api_handlers import _kpi_read_filters
+
+    handler, query = kpi_dimension_reader
+    request = Request("GET", query=QueryParams(
+        query + [(f"dimension.{key}", value)]
+    ))
+    with pytest.raises(ValueError):
+        _kpi_read_filters(request)
+    response = await handler(request)
+
+    assert response.status == 400
+    assert json.loads(response.text)["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_kpi_reads_reject_too_many_dimension_filters(kpi_db, kpi_dimension_reader):
+    handler, query = kpi_dimension_reader
+    dimensions = [(f"dimension.key_{index}", "TCP") for index in range(33)]
+    response = await handler(Request("GET", query=QueryParams(query + dimensions)))
+
+    assert response.status == 400
+    assert json.loads(response.text)["success"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dimension, filter_value", [
+    pytest.param(-(2 ** 63), str(-(2 ** 63)), id="minimum-int64"),
+    pytest.param(2 ** 63 - 1, str(2 ** 63 - 1), id="maximum-int64"),
+    pytest.param(0, "0", id="zero"),
+    pytest.param(1.7976931348623157e308, "1.7976931348623157e308", id="maximum-float"),
+    pytest.param(-1.7976931348623157e308, "-1.7976931348623157e308", id="minimum-float"),
+    pytest.param(True, "true", id="true"),
+    pytest.param(False, "false", id="false"),
+    pytest.param("TCP", "TCP", id="unquoted-string"),
+    pytest.param("TCP", '"TCP"', id="json-string"),
+    pytest.param("null", '"null"', id="quoted-null"),
+    pytest.param("true", '"true"', id="quoted-boolean"),
+    pytest.param("false", '"false"', id="quoted-false"),
+    pytest.param("True", "True", id="non-json-unquoted-string"),
+    pytest.param("123", '"123"', id="quoted-number"),
+    pytest.param("", '""', id="empty-json-string"),
+    pytest.param("", "", id="empty-unquoted-string"),
+    pytest.param("x" * 256, "x" * 256, id="maximum-unquoted-string"),
+    pytest.param("x" * 256, json.dumps("x" * 256), id="maximum-json-string"),
+])
+async def test_kpi_scalar_dimension_boundaries_are_preserved(
+    kpi_db, kpi_dimension_reader, dimension, filter_value
+):
+    from testrift_server.api_handlers import _kpi_read_filters, api_run_kpis_handler
+
+    payload = _payload()
+    payload["_samples"] = payload["_samples"][:1]
+    payload["_samples"][0]["dimensions"] = {"Boundary_1": dimension}
+    assert (await api_run_kpis_handler(_request(payload))).status == 201
+
+    handler, query = kpi_dimension_reader
+    request = Request("GET", query=QueryParams(query + [("dimension.Boundary_1", filter_value)]))
+    filters, _, _ = _kpi_read_filters(request)
+    assert filters["dimensions"]["Boundary_1"] == dimension
+    assert type(filters["dimensions"]["Boundary_1"]) is type(dimension)
+
+    response = await handler(request)
+    assert response.status == 200
+    body = json.loads(response.text)
+    assert body["pagination"]["count"] == 1
+    assert len(body["data"]) == 1
+    if handler.__name__ == "api_kpi_catalog_handler":
+        assert body["data"][0]["dimensions"]["Boundary_1"] == dimension
+    else:
+        assert body["data"][0]["value"] == payload["_samples"][0]["value"]
+
+
+@pytest.mark.asyncio
+async def test_kpi_upload_and_filters_accept_32_dimensions(kpi_db, kpi_dimension_reader):
+    from testrift_server.api_handlers import api_run_kpis_handler
+
+    payload = _payload()
+    payload["_samples"] = payload["_samples"][:1]
+    payload["_samples"][0]["dimensions"] = {f"key_{index}": index for index in range(32)}
+    assert (await api_run_kpis_handler(_request(payload))).status == 201
+
+    handler, query = kpi_dimension_reader
+    dimensions = [(f"dimension.key_{index}", str(index)) for index in range(32)]
+    response = await handler(Request("GET", query=QueryParams(query + dimensions)))
+    assert response.status == 200
+    assert json.loads(response.text)["pagination"]["count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_run_catalog_and_series_reads_filter_and_paginate(kpi_db):
     from testrift_server.api_handlers import (
         api_kpi_catalog_handler,

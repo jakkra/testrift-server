@@ -7,8 +7,19 @@
   --tr-sidebar-muted: #8b889c;
   --tr-sidebar-active-bg: rgba(102, 126, 234, 0.28);
   --tr-sidebar-hover-bg: rgba(255, 255, 255, 0.06);
-  --tr-sidebar-accent: #667eea;
+  --tr-sidebar-accent: var(--tr-accent);
   --tr-page-bg: #eef0f7;
+  --tr-accent: #667eea;
+  --tr-accent-hover: #764ba2;
+  --tr-header-gradient: linear-gradient(135deg, var(--tr-accent) 0%, var(--tr-accent-hover) 100%);
+  --tr-on-accent: #fff;
+  --tr-ink: #30343a;
+  --tr-muted: #6c757d;
+  --tr-border: #e9ecef;
+  --tr-surface: #fff;
+  --tr-wash: #f8f9fa;
+  --tr-hover: #f0f2ff;
+  --tr-focus-ring: rgba(102, 126, 234, 0.2);
 }
 
 body.app-layout {

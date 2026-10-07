@@ -20,7 +20,17 @@
   const compareAllButton = document.getElementById("kpi-compare-all");
   const compareClearButton = document.getElementById("kpi-compare-clear");
   const compareApplyButton = document.getElementById("kpi-compare-apply");
-  const colors = ["#0b806a", "#d39415", "#3e80b4", "#bf5b49", "#8464a0", "#788a39", "#2c9396", "#bd7283"];
+  const sharedStyles = getComputedStyle(document.documentElement);
+  const themeColor = (name, fallback) => sharedStyles.getPropertyValue(name).trim() || fallback;
+  const chartTheme = {
+    accent: themeColor("--tr-accent", "#667eea"),
+    muted: themeColor("--tr-muted", "#6c757d"),
+    border: themeColor("--tr-border", "#e9ecef"),
+    tooltip: themeColor("--tr-sidebar-bg", "#1f1e2e"),
+    onAccent: themeColor("--tr-on-accent", "#fff"),
+    focus: themeColor("--tr-focus-ring", "rgba(102, 126, 234, 0.2)"),
+  };
+  const colors = [chartTheme.accent, "#d39415", "#3e80b4", "#bf5b49", "#8464a0", "#788a39", "#2c9396", "#bd7283"];
   const metricLabels = {
     "throughput.tx_throughput": "TX throughput",
     "throughput.rx_throughput": "RX throughput",
@@ -281,8 +291,8 @@
   function groupLabel(group) {
     if (!group) return "Ungrouped";
     const parts = group.split(".");
-    const family = parts.at(-1);
-    const parent = parts.at(-2);
+    const family = parts[parts.length - 1];
+    const parent = parts[parts.length - 2];
     return !parent || parent === family ? family : `${parent} · ${family}`;
   }
 
@@ -290,7 +300,7 @@
     const root = { children: new Map(), panels: [] };
     items.forEach(item => {
       const parts = item.group.split(".");
-      const category = parts.length > 1 ? parts.at(-2) : groupLabel(item.group);
+      const category = parts.length > 1 ? parts[parts.length - 2] : groupLabel(item.group);
       if (!root.children.has(category)) root.children.set(category, { label: category, children: new Map(), panels: [] });
       root.children.get(category).panels.push(item);
     });
@@ -582,13 +592,13 @@
         return colors[colorIndex % colors.length];
       }),
       grid: { top: 28, left: 10, right: 20, bottom: 74, containLabel: true },
-      xAxis: { type: "time", axisLabel: { color: "#54656a" }, splitLine: { show: true, lineStyle: { color: "#e7eeec" } } },
-      yAxis: { type: "value", name: scale.label, nameTextStyle: { color: "#54656a" },
-        axisLabel: { color: "#54656a", formatter: value => (value / scale.divisor).toLocaleString() },
-        splitLine: { lineStyle: { color: "#e2e9e6" } } },
+      xAxis: { type: "time", axisLabel: { color: chartTheme.muted }, splitLine: { show: true, lineStyle: { color: chartTheme.border } } },
+      yAxis: { type: "value", name: scale.label, nameTextStyle: { color: chartTheme.muted },
+        axisLabel: { color: chartTheme.muted, formatter: value => (value / scale.divisor).toLocaleString() },
+        splitLine: { lineStyle: { color: chartTheme.border } } },
       tooltip: { trigger: "axis", confine: true,
         extraCssText: "width:min(340px,calc(100% - 16px));max-height:220px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;white-space:normal;",
-        backgroundColor: "#1a3034", borderWidth: 0, textStyle: { color: "#fff", fontSize: 12 },
+        backgroundColor: chartTheme.tooltip, borderWidth: 0, textStyle: { color: chartTheme.onAccent, fontSize: 12 },
         axisPointer: { type: "cross", snap: true }, formatter: items => {
           const entries = items.filter(item => item.data?.point);
           if (!entries.length) return "";
@@ -602,7 +612,7 @@
       dataZoom: [
         { type: "inside", xAxisIndex: 0, filterMode: "none", zoomOnMouseWheel: "shift" },
         { type: "slider", xAxisIndex: 0, filterMode: "none", height: 18, bottom: 18,
-          borderColor: "#cbd9d4", fillerColor: "#0b806a24", handleStyle: { color: "#0b806a" } },
+          borderColor: chartTheme.border, fillerColor: chartTheme.focus, handleStyle: { color: chartTheme.accent } },
       ],
       series: visibleSeries.map(series => ({
         name: series.label, type: "line", triggerLineEvent: true,

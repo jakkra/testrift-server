@@ -46,6 +46,7 @@ MAX_KPI_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_KPI_SAMPLES = 10000
 KPI_METRIC_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 KPI_UNIT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/%*-]{0,31}$")
+KPI_DIMENSION_KEY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
 
 async def _json_body(request):
@@ -108,7 +109,7 @@ def _validate_kpi_payload(payload):
         if not isinstance(dimensions, dict) or len(dimensions) > 32:
             raise ValueError(f"_samples[{index}].dimensions must be an object with at most 32 items")
         for key, dimension in dimensions.items():
-            if not isinstance(key, str) or not key.isascii() or not key.replace("_", "").isalnum() or not key[0].isalpha():
+            if not isinstance(key, str) or not KPI_DIMENSION_KEY_PATTERN.fullmatch(key):
                 raise ValueError(f"_samples[{index}] has an invalid dimension name")
             if isinstance(dimension, bool):
                 continue
@@ -208,7 +209,13 @@ def _kpi_read_filters(request, require_series=False):
             except (json.JSONDecodeError, TypeError):
                 dimensions[key] = value
     if dimensions:
-        for dimension in dimensions.values():
+        if len(dimensions) > 32:
+            raise ValueError("Dimension filters must contain at most 32 items")
+        for key, dimension in dimensions.items():
+            if not KPI_DIMENSION_KEY_PATTERN.fullmatch(key):
+                raise ValueError("Invalid dimension filter name")
+            if isinstance(dimension, str) and len(dimension) > 256:
+                raise ValueError("Dimension filter strings must contain at most 256 characters")
             if isinstance(dimension, int) and not isinstance(dimension, bool) and not -(2 ** 63) <= dimension < 2 ** 63:
                 raise ValueError("Integer dimension filters must fit in signed 64 bits")
             if isinstance(dimension, float) and not math.isfinite(dimension):

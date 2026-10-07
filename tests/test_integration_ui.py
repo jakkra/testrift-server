@@ -192,8 +192,8 @@ data:
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(not PLAYWRIGHT_AVAILABLE, reason="Playwright not installed")
-    async def test_log_message_with_dir_field_displays_badge(self, server_process, browser_page):
-        """Test that log messages with dir field display direction badges in UI."""
+    async def test_log_message_with_dir_field_displays_direction(self, server_process, browser_page):
+        """Test that explicit log directions control message styling and tooltips."""
         port, server_proc = server_process
         page = browser_page
 
@@ -228,30 +228,23 @@ data:
         url = f"http://127.0.0.1:{port}/testRun/{run_id}/log/{tc_id}.html"
         await page.goto(url, wait_until="domcontentloaded", timeout=5000)
 
-        # Step 3: Verify UI displays direction badges
         await page.wait_for_selector("#msg_table tbody tr", timeout=5000)
 
-        # Check for TX badge (Host → DUT)
-        tx_badge = page.locator("text=Host → DUT")
-        await expect(tx_badge).to_be_visible()
+        tx_message = page.locator("#msg_table .at-command-detail.at-tx")
+        await expect(tx_message).to_have_count(1)
+        await expect(tx_message).to_be_visible()
+        await expect(tx_message).to_have_attribute("title", "Command sent by host to DUT")
+        await expect(tx_message.locator(".at_cmd")).to_have_text("AT+TEST=1")
 
-        # Check for RX badge (Host ← DUT)
-        rx_badge = page.locator("text=Host ← DUT")
-        await expect(rx_badge).to_be_visible()
-
-        # Verify the messages are displayed
-        await expect(page.locator("text=AT+TEST=1")).to_be_visible()
-        await expect(page.locator("text=OK")).to_be_visible()
+        rx_message = page.locator("#msg_table .at-command-detail.at-rx")
+        await expect(rx_message).to_have_count(1)
+        await expect(rx_message).to_be_visible()
+        await expect(rx_message).to_have_attribute("title", "Response received by host from DUT")
+        await expect(rx_message.locator(".at_cmd")).to_have_text("OK")
 
         # Verify component/channel badges are displayed
         await expect(page.locator("#msg_table").get_by_text("TestDevice").first).to_be_visible()
         await expect(page.locator("#msg_table").get_by_text("COM1").first).to_be_visible()
-
-        # Verify spacing between badge and message
-        table_html = await page.locator("#msg_table").inner_html()
-        # The HTML should contain the badge followed by a space and the message
-        assert "Host → DUT" in table_html
-        assert "Host ← DUT" in table_html
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(not PLAYWRIGHT_AVAILABLE, reason="Playwright not installed")
@@ -450,19 +443,19 @@ data:
         await page.wait_for_selector("#test-cases-list", timeout=5000)
         await asyncio.sleep(0.5)
 
-        tc_right_elements = await page.locator(".tc-right").all()
-        assert len(tc_right_elements) >= 3, "Expected at least 3 test case badges"
+        tc_right_elements = page.locator("li.test-case-node .tc-right")
+        await expect(tc_right_elements).to_have_count(len(test_cases))
 
         left_positions = []
-        for element in tc_right_elements:
+        for element in await tc_right_elements.all():
+            await expect(element).to_be_visible()
             box = await element.bounding_box()
-            if box:
-                left_positions.append(box['x'])
+            assert box is not None, "Test case badge should have a bounding box"
+            left_positions.append(box['x'])
 
-        if left_positions:
-            first_left = left_positions[0]
-            for pos in left_positions:
-                assert abs(pos - first_left) < 5, f"Status badges not aligned: positions {left_positions}"
+        first_left = left_positions[0]
+        for pos in left_positions:
+            assert abs(pos - first_left) < 5, f"Status badges not aligned: positions {left_positions}"
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(not PLAYWRIGHT_AVAILABLE, reason="Playwright not installed")
@@ -541,16 +534,15 @@ data:
         await page.wait_for_selector("#test-cases-list", timeout=5000)
         await asyncio.sleep(0.3)
 
-        # Find the .tc-right element (status badge container)
-        tc_right = page.locator(".tc-right").first
+        test_case_li = page.locator("li.test-case-node").first
+        await test_case_li.scroll_into_view_if_needed()
+        tc_right = test_case_li.locator(".tc-right")
 
         # Get position before hover
         box_before = await tc_right.bounding_box()
         assert box_before is not None, "Could not get bounding box of .tc-right"
         x_before = box_before['x']
 
-        # Find the parent li and hover over it
-        test_case_li = page.locator("li.test-case-node").first
         await test_case_li.hover()
         await asyncio.sleep(0.3)  # Wait for any transition
 

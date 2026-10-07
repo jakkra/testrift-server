@@ -176,7 +176,7 @@ async function loadChart(apiOptions) {
   for (let attempt = 0; attempt < 20 && !charts[0]?.options; attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 0));
   }
-  if (!charts[0]?.options) throw new Error("KPI chart did not finish loading");
+  if (!charts[0]?.options) throw new Error(`KPI chart did not finish loading: ${document.getElementById("kpi-status").textContent}`);
   return { chart: charts[0], charts, legend: document.querySelector(".kpi-series-legend") };
 }
 
@@ -191,6 +191,7 @@ async function waitFor(predicate) {
 describe("KPI grouped chart interactions", () => {
   beforeEach(() => {
     jest.resetModules();
+    document.documentElement.removeAttribute("style");
     document.body.innerHTML = "";
     scrollRequests = [];
     simulatedScrollY = 500;
@@ -203,6 +204,19 @@ describe("KPI grouped chart interactions", () => {
     expect(chart.options.series).toHaveLength(2);
     expect(chart.options.series.flatMap(series => series.data)).toHaveLength(2);
     expect(window.fetch.mock.calls.filter(([url]) => url.includes("offset=1"))).toHaveLength(2);
+  });
+
+  test("chart chrome inherits the shared site theme", async () => {
+    document.documentElement.style.setProperty("--tr-accent", "#123456");
+    document.documentElement.style.setProperty("--tr-muted", "#654321");
+    document.documentElement.style.setProperty("--tr-border", "#abcdef");
+    document.documentElement.style.setProperty("--tr-sidebar-bg", "#112233");
+    const { chart } = await loadChart();
+    expect(chart.options.color[0]).toBe("#123456");
+    expect(chart.options.xAxis.axisLabel.color).toBe("#654321");
+    expect(chart.options.yAxis.splitLine.lineStyle.color).toBe("#abcdef");
+    expect(chart.options.tooltip.backgroundColor).toBe("#112233");
+    expect(chart.options.dataZoom[1].handleStyle.color).toBe("#123456");
   });
 
   test("zero-only metrics remain visible in the all-metrics overview", async () => {
@@ -308,7 +322,7 @@ describe("KPI grouped chart interactions", () => {
 
     document.getElementById("kpi-compare-apply").click();
     await waitFor(() => !dialog.open && charts.length > initialChartCount
-      && charts.at(-1).options?.series?.length === 2);
+      && charts[charts.length - 1].options?.series?.length === 2);
     await waitFor(() => simulatedScrollY === 360);
     expect(document.getElementById("kpi-metric").value).toBe("latency.average\tms");
     expect(document.getElementById("kpi-testcase").value).toBe(testNames[0]);
@@ -329,7 +343,7 @@ describe("KPI grouped chart interactions", () => {
     await waitFor(() => !document.querySelector(".kpi-clear-comparison")
       && document.getElementById("kpi-metric").value === ""
       && document.getElementById("kpi-testcase").value === ""
-      && charts.at(-1).options?.series?.length === 2);
+      && charts[charts.length - 1].options?.series?.length === 2);
     await waitFor(() => simulatedScrollY === 500);
     expect([...document.querySelectorAll(".kpi-path-group")].every(group => !group.open)).toBe(true);
     expect(window.scrollTo).toHaveBeenCalledTimes(2);
@@ -349,9 +363,9 @@ describe("KPI grouped chart interactions", () => {
 
     document.getElementById("kpi-compare-apply").click();
     await waitFor(() => charts.length > initialChartCount
-      && charts.at(-1).options.series.length === 2);
+      && charts[charts.length - 1].options.series.length === 2);
 
-    expect(charts.at(-1).options.series.map(series => series.name)).toEqual([
+    expect(charts[charts.length - 1].options.series.map(series => series.name)).toEqual([
       "Device A · TestAlpha",
       "Device B · TestAlpha",
     ]);
