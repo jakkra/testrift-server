@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const normalize = value => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const normalize = value => value.normalize("NFC").toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, " ").trim();
 
   class KpiTestcasePicker {
     constructor(select) {
@@ -88,9 +88,9 @@
     matches(query) {
       const text = normalize(query);
       if (!text) return this.entries;
-      const tokens = text.match(/[a-z]+|[0-9]+/g);
+      const tokens = text.match(/[\p{L}\p{M}]+|\p{N}+/gu);
       const tokenMatches = tokens.map(token => new Map(
-        token.length < 3 || !/^[a-z]+$/.test(token)
+        token.length < 3 || !/^[\p{L}\p{M}]+$/u.test(token)
           ? [] : this.fuse.search(token).map(result => [result.item.value, result.score])
       ));
       return this.entries.map(entry => {

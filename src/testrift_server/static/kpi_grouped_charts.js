@@ -241,9 +241,13 @@
   function renderDimensionFilters(dimensionOptions, sourceRows) {
     const previous = new Map([...dimensionFiltersElement.querySelectorAll("select[data-filter-name]")]
       .map(select => [select.dataset.filterName, select.value]));
-    const valuesByDimension = new Map(dimensionOptions.map(({ dimension_key, values }) => [
+    const valuesByDimension = new Map(dimensionOptions.map(({ dimension_key, values, options }) => [
       dimension_key,
-      new Map(values.map(value => [JSON.stringify(value), value])),
+      new Map((options || values).map(option => {
+        const value = option && typeof option === "object" ? option.value : option;
+        const token = typeof option?.filter_token === "string" ? option.filter_token : JSON.stringify(value);
+        return [token, typeof value === "string" ? value : token];
+      })),
     ]));
 
     dimensionFiltersElement.replaceChildren();
@@ -436,6 +440,10 @@
   async function applyComparison() {
     if (!comparisonDraft) return;
     const draft = comparisonDraft;
+    if (draft.targetKeys.size > 49) {
+      updateComparisonNote("Select at most 49 comparison targets; the baseline is included in the 50-target limit.");
+      return;
+    }
     const selection = {
       metricValue: draft.metricValue,
       testName: draft.testName,
@@ -487,6 +495,7 @@
     const labels = testLabels(names);
     const { unit } = panel;
     const points = result.data.filter(point => !selectedTestName || point.test_name === selectedTestName);
+    panel.loading.textContent = points.length ? "" : "No KPI history is available for this test in the selected filters.";
     const targetKeys = [...new Set(points.map(point => point.target_key || window.KPI_TARGET))];
     const seriesDefinitions = targetKeys.flatMap(targetKey => names
       .filter(name => points.some(point => point.test_name === name && (point.target_key || window.KPI_TARGET) === targetKey))
@@ -730,6 +739,8 @@
   }
 
   async function loadCatalog() {
+    const selected = testcaseSelect.value;
+    const selectedOption = selected ? testcaseSelect.selectedOptions[0]?.cloneNode(true) : null;
     generation += 1;
     controller?.abort();
     controller = new AbortController();
@@ -749,20 +760,26 @@
       }, controller.signal);
       if (sequence !== generation) return;
       catalog = result.testcases;
-      const selected = testcaseSelect.value;
       const metricCatalog = catalog.filter(test =>
         !metricSelect.value || `${test.metric_key}\t${test.unit}` === metricSelect.value
       );
       testcaseSelect.replaceChildren(new Option("All test families", ""));
-      const testNames = [...new Set(metricCatalog.map(test => test.test_name))];
+      const testMetricValues = new Map();
+      metricCatalog.forEach(test => {
+        if (!testMetricValues.has(test.test_name)) testMetricValues.set(test.test_name, new Set());
+        testMetricValues.get(test.test_name).add(`${test.metric_key}\t${test.unit}`);
+      });
+      const testNames = [...testMetricValues.keys()];
       const labels = testLabels(testNames);
       testNames.forEach(name => {
         const option = new Option(`${groupLabel(groupName(name))} · ${labels.get(name)}`, name);
         option.title = name;
+        option.dataset.metricValues = JSON.stringify([...testMetricValues.get(name)]);
         testcaseSelect.appendChild(option);
       });
-      testcaseSelect.value = testNames.includes(selected) ? selected : "";
-      testcaseSelect.disabled = !testNames.length;
+      if (selectedOption && !testNames.includes(selected)) testcaseSelect.appendChild(selectedOption);
+      testcaseSelect.value = selected;
+      testcaseSelect.disabled = !testNames.length && !selected;
       testcasePicker.refresh();
       if (comparedTargetKeys.size && (!metricSelect.value || !testcaseSelect.value)) {
         setStatus("Choose one metric and one test case to compare targets.");
@@ -776,6 +793,14 @@
         if (!groups.has(panelId)) groups.set(panelId, { group, metricValue, tests: [] });
         groups.get(panelId).tests.push(test);
       });
+      if (selected && !testNames.includes(selected)) {
+        const metricValues = metricSelect.value ? [metricSelect.value]
+          : JSON.parse(selectedOption?.dataset.metricValues || "[]");
+        metricValues.forEach(metricValue => {
+          const group = groupName(selected);
+          groups.set(`${metricValue}\t${group}`, { group, metricValue, tests: [] });
+        });
+      }
       const ordered = [...groups.values()]
         .sort((left, right) => left.group.localeCompare(right.group) || left.metricValue.localeCompare(right.metricValue));
       jumpSelect.replaceChildren();

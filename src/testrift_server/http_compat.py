@@ -227,9 +227,9 @@ class CompatRequest:
             return await self._request.body()
         body = bytearray()
         async for chunk in self._request.stream():
-            body.extend(chunk)
-            if len(body) > max_bytes:
+            if len(body) + len(chunk) > max_bytes:
                 raise RequestBodyTooLarge()
+            body.extend(chunk)
         return bytes(body)
 
     async def post(self):

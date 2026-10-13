@@ -1203,24 +1203,23 @@ class TestResultsDatabase:
                 ),
             )
             batch_id = cursor.lastrowid
+            test_case_cursor = await db.execute(
+                "SELECT tc_full_name, id FROM test_cases WHERE run_id = ? ORDER BY id",
+                (run_id,),
+            )
+            test_case_ids = {}
+            for test_name, test_case_id in await test_case_cursor.fetchall():
+                test_case_ids.setdefault(test_name, test_case_id)
+            provenance_json = json.dumps(provenance, separators=(",", ":"))
+            sample_rows = []
             matched_count = 0
             unmatched_count = 0
             for ordinal, sample in enumerate(samples):
-                test_case_cursor = await db.execute(
-                    "SELECT id FROM test_cases WHERE run_id = ? AND tc_full_name = ?",
-                    (run_id, sample["test_name"]),
-                )
-                test_case = await test_case_cursor.fetchone()
-                test_case_id = test_case[0] if test_case else None
-                match_status = "matched" if test_case else "unmatched"
-                matched_count += test_case is not None
-                unmatched_count += test_case is None
-                await db.execute(
-                    """INSERT INTO kpi_samples
-                       (batch_id, run_id, test_case_id, test_name, match_status,
-                        metric_key, value, unit, dimensions_json, sample_time,
-                        ordinal, source_type, provenance_json)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                test_case_id = test_case_ids.get(sample["test_name"])
+                match_status = "matched" if test_case_id is not None else "unmatched"
+                matched_count += test_case_id is not None
+                unmatched_count += test_case_id is None
+                sample_rows.append(
                     (
                         batch_id,
                         run_id,
@@ -1234,9 +1233,17 @@ class TestResultsDatabase:
                         sample.get("timestamp_utc"),
                         ordinal,
                         source_type,
-                        json.dumps(provenance, separators=(",", ":")),
+                        provenance_json,
                     ),
                 )
+            await db.executemany(
+                """INSERT INTO kpi_samples
+                   (batch_id, run_id, test_case_id, test_name, match_status,
+                    metric_key, value, unit, dimensions_json, sample_time,
+                    ordinal, source_type, provenance_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                sample_rows,
+            )
 
             await db.commit()
             return {
@@ -1270,8 +1277,18 @@ class TestResultsDatabase:
         for key, value in (filters.get("dimensions") or {}).items():
             if not key.isascii() or not key.replace("_", "").isalnum() or not key[0].isalpha():
                 raise ValueError("Invalid KPI dimension name")
+            path = f"$.{key}"
+            if isinstance(value, bool):
+                clauses.append("json_type(ks.dimensions_json, ?) = ?")
+                params.extend((path, "true" if value else "false"))
+            elif isinstance(value, (int, float)):
+                clauses.append("json_type(ks.dimensions_json, ?) IN ('integer', 'real')")
+                params.append(path)
+            elif isinstance(value, str):
+                clauses.append("json_type(ks.dimensions_json, ?) = 'text'")
+                params.append(path)
             clauses.append("json_extract(ks.dimensions_json, ?) = ?")
-            params.extend((f"$.{key}", value))
+            params.extend((path, value))
         source_filters = [(key, column) for key, column in (
             ("source_role", "source_role"),
             ("source_branch", "branch"),
@@ -1457,6 +1474,7 @@ class TestResultsDatabase:
         async with self.get_connection() as db:
             cursor = await db.execute(query, params)
             options: Dict[str, List[Any]] = {}
+            typed_options: Dict[str, List[Dict[str, Any]]] = {}
             for key, value_type, value in await cursor.fetchall():
                 if value_type == "true":
                     value = True
@@ -1465,8 +1483,13 @@ class TestResultsDatabase:
                 elif value_type in ("array", "object"):
                     value = json.loads(value)
                 options.setdefault(key, []).append(value)
+                typed_options.setdefault(key, []).append({
+                    "value": value,
+                    "value_type": value_type,
+                    "filter_token": json.dumps(value, separators=(",", ":"), allow_nan=False),
+                })
             return [
-                {"dimension_key": key, "values": values}
+                {"dimension_key": key, "values": values, "options": typed_options[key]}
                 for key, values in options.items()
             ]
 

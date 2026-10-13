@@ -60,7 +60,10 @@ function installObservers() {
   };
 }
 
-function installApi({ names = testNames, value = 10, maxAbsValue = 11, pageSize = 500 } = {}) {
+function installApi({ names = testNames, value = 10, maxAbsValue = 11, pageSize = 500, dimensionOptions = [], sourceRows = [], historyNames = () => names, targets = [
+  { key: "device-a", display_name: "Device A" },
+  { key: "device-b", display_name: "Device B" },
+] } = {}) {
   const points = names.map((test_name, index) => ({
     run_id: `run-${index}`,
     target_key: "device-a",
@@ -81,10 +84,7 @@ function installApi({ names = testNames, value = 10, maxAbsValue = 11, pageSize 
   window.fetch = jest.fn(async input => {
     const url = new URL(input, window.location.origin);
     if (url.pathname.endsWith("/api/targets")) {
-      return response({ data: [
-        { key: "device-a", display_name: "Device A" },
-        { key: "device-b", display_name: "Device B" },
-      ] });
+      return response({ data: targets });
     }
     if (url.pathname.endsWith("/metrics")) {
       return response({ data: url.searchParams.getAll("target").map(target_key => ({
@@ -92,12 +92,12 @@ function installApi({ names = testNames, value = 10, maxAbsValue = 11, pageSize 
         last_sample: "2026-09-02T00:00:00Z", sample_count: 2,
       })) });
     }
-    if (url.pathname.endsWith("/dimension-options")) return response({ data: [] });
+    if (url.pathname.endsWith("/dimension-options")) return response({ data: dimensionOptions });
     if (url.pathname.endsWith("/source-options")) {
-      return response({ data: [], pagination: { count: 0 } });
+      return response({ data: sourceRows, pagination: { count: sourceRows.length } });
     }
     if (url.pathname.endsWith("/history") && url.searchParams.has("catalog_only")) {
-      const testcases = names.map(test_name => ({
+      const testcases = historyNames(url.searchParams).map(test_name => ({
           test_name,
           metric_key: "latency.average",
           unit: "ms",
@@ -115,7 +115,9 @@ function installApi({ names = testNames, value = 10, maxAbsValue = 11, pageSize 
         ? [...points, ...peerPoints]
         : points;
       const selectedTestName = url.searchParams.get("test_name");
-      const data = allData.filter(point => !selectedTestName || point.test_name === selectedTestName);
+      const availableNames = historyNames(url.searchParams);
+      const data = allData.filter(point => availableNames.includes(point.test_name)
+        && (!selectedTestName || point.test_name === selectedTestName));
       const offset = Number(url.searchParams.get("offset") || 0);
       return response({
         selected_test_name: selectedTestName,
@@ -131,7 +133,7 @@ function installApi({ names = testNames, value = 10, maxAbsValue = 11, pageSize 
 async function loadChart(apiOptions) {
   document.body.innerHTML = `
     <select id="kpi-metric"></select>
-    <select id="kpi-testcase"></select>
+    <select id="kpi-testcase" disabled><option value="">Loading test cases...</option></select>
     <details id="kpi-filter-disclosure"><div id="kpi-dimension-filters"></div></details>
     <div id="kpi-range">
       <button data-days="7" aria-pressed="false"></button>
@@ -201,9 +203,50 @@ describe("KPI grouped chart interactions", () => {
 
   test("catalog and history requests collect every page", async () => {
     const { chart } = await loadChart({ pageSize: 1 });
+    expect(document.getElementById("kpi-testcase").value).toBe("");
+    expect(document.getElementById("kpi-testcase-search").value).toBe("All test families");
     expect(chart.options.series).toHaveLength(2);
     expect(chart.options.series.flatMap(series => series.data)).toHaveLength(2);
     expect(window.fetch.mock.calls.filter(([url]) => url.includes("offset=1"))).toHaveLength(2);
+  });
+
+  test("dimension options retain exact scalar tokens through labels and outgoing filters", async () => {
+    const dimensionOptions = JSON.parse(`[{"dimension_key":"frame_size_bytes","values":[9007199254740992,9007199254740993,-9223372036854775808,9223372036854775807,true,false,"9007199254740993"],"options":[
+      {"value":9007199254740992,"filter_token":"9007199254740992"},
+      {"value":9007199254740993,"filter_token":"9007199254740993"},
+      {"value":-9223372036854775808,"filter_token":"-9223372036854775808"},
+      {"value":9223372036854775807,"filter_token":"9223372036854775807"},
+      {"value":true,"filter_token":"true"},
+      {"value":false,"filter_token":"false"},
+      {"value":"9007199254740993","filter_token":"\\\"9007199254740993\\\""}
+    ]}]`);
+    expect(dimensionOptions[0].values[0]).toBe(dimensionOptions[0].values[1]);
+    const { charts } = await loadChart({ dimensionOptions });
+    for (const option of dimensionOptions[0].options) {
+      const select = document.querySelector('[data-filter-name="dimension.frame_size_bytes"]');
+      const rendered = [...select.options].find(item => item.value === option.filter_token);
+      expect(rendered).toBeDefined();
+      expect(rendered.textContent).toBe(typeof option.value === "string" ? option.value : option.filter_token);
+      const chartCount = charts.length;
+      window.fetch.mockClear();
+      select.value = option.filter_token;
+      select.dispatchEvent(new Event("change"));
+      await waitFor(() => charts.length > chartCount && charts[charts.length - 1].options);
+      const requests = window.fetch.mock.calls.map(([input]) => new URL(input, window.location.origin))
+        .filter(url => url.pathname.endsWith("/history"));
+      expect(requests).toHaveLength(2);
+      requests.forEach(url => expect(url.searchParams.get("dimension.frame_size_bytes")).toBe(option.filter_token));
+      expect(document.querySelector('[data-filter-name="dimension.frame_size_bytes"]').value).toBe(option.filter_token);
+    }
+  });
+
+  test("legacy scalar dimension options retain their natural labels and typed filters", async () => {
+    await loadChart({ dimensionOptions: [{ dimension_key: "tls", values: [false, true, 244, "244", { value: 115200 }, { value: "serial" }] }] });
+    const select = document.querySelector('[data-filter-name="dimension.tls"]');
+    expect([...select.options].map(option => [option.value, option.textContent])).toEqual(expect.arrayContaining([
+      ["false", "false"], ["true", "true"], ["244", "244"], ['"244"', "244"],
+      ["115200", "115200"], ['"serial"', "serial"],
+    ]));
   });
 
   test("chart chrome inherits the shared site theme", async () => {
@@ -268,6 +311,101 @@ describe("KPI grouped chart interactions", () => {
     expect(input.value).toContain("TestBeta");
   });
 
+  test.each([
+    ["range", false, false], ["range", true, false],
+    ["dimension", false, false], ["dimension", true, false],
+    ["source", false, false], ["source", true, false],
+    ["range", false, true],
+  ])("%s refresh retains a missing selected test (other tests: %s, explicit metric: %s)", async (filter, hasOtherTests, explicitMetric) => {
+    const filteredNames = hasOtherTests ? [testNames[1]] : [];
+    const isFiltered = params => filter === "range"
+      ? Date.parse(params.get("to")) - Date.parse(params.get("from")) === 7 * 86400000
+      : params.has(filter === "dimension" ? "dimension.tls" : "source_role");
+    const { charts } = await loadChart({
+      dimensionOptions: [{ dimension_key: "tls", values: [true] }],
+      sourceRows: [{ source_role: "dut" }],
+      historyNames: params => isFiltered(params) ? filteredNames : testNames,
+    });
+    const changeSelection = async (select, value) => {
+      const chartCount = charts.length;
+      select.value = value;
+      select.dispatchEvent(new Event("change"));
+      await waitFor(() => charts.length > chartCount && charts[charts.length - 1].options);
+    };
+    if (explicitMetric) await changeSelection(document.getElementById("kpi-metric"), "latency.average\tms");
+    const testcase = document.getElementById("kpi-testcase");
+    await changeSelection(testcase, testNames[0]);
+    const selectedLabel = testcase.selectedOptions[0].textContent;
+    const changeFilter = async enabled => {
+      const chartCount = charts.length;
+      if (filter === "range") document.querySelector(`[data-days="${enabled ? 7 : 30}"]`).click();
+      else {
+        const select = document.querySelector(`[data-filter-name="${filter === "dimension" ? "dimension.tls" : "source_role"}"]`);
+        select.value = enabled ? (filter === "dimension" ? "true" : "dut") : "";
+        select.dispatchEvent(new Event("change"));
+      }
+      await waitFor(() => charts.length > chartCount && charts[charts.length - 1].options);
+    };
+    window.fetch.mockClear();
+    await changeFilter(true);
+    expect(testcase.value).toBe(testNames[0]);
+    expect(testcase.selectedOptions[0].textContent).toBe(selectedLabel);
+    expect(document.getElementById("kpi-testcase-search").value).toBe(selectedLabel);
+    expect(testcase.disabled).toBe(false);
+    expect(document.querySelectorAll(".kpi-chart-section")).toHaveLength(1);
+    expect(charts[charts.length - 1].options.series).toHaveLength(0);
+    expect(document.querySelector(".kpi-group-loading").textContent).toContain("No KPI history");
+    expect(document.querySelector(".kpi-chart-header p").textContent).toContain("0 measurements");
+    expect(document.getElementById("kpi-group-count").textContent).toContain(`${filteredNames.length} tests`);
+    const historyRequests = () => window.fetch.mock.calls.map(([input]) => new URL(input, window.location.origin))
+      .filter(url => url.pathname.endsWith("/history") && !url.searchParams.has("catalog_only"));
+    expect(historyRequests()).toHaveLength(1);
+    expect(historyRequests()[0].searchParams.get("test_name")).toBe(testNames[0]);
+    expect(historyRequests()[0].searchParams.has("test_group")).toBe(false);
+    expect(historyRequests()[0].searchParams.get("metric_key")).toBe("latency.average");
+    await changeFilter(true);
+    expect(testcase.value).toBe(testNames[0]);
+    expect(charts[charts.length - 1].options.series).toHaveLength(0);
+    await changeFilter(false);
+    expect(testcase.value).toBe(testNames[0]);
+    expect(charts[charts.length - 1].options.series).toHaveLength(1);
+    expect(charts[charts.length - 1].options.series[0].data[0].point.test_name).toBe(testNames[0]);
+    expect(document.querySelector(".kpi-group-loading").textContent).toBe("");
+    await changeFilter(true);
+    const clear = document.querySelector('[aria-label="Clear test case"]');
+    expect(clear.disabled).toBe(false);
+    const chartCount = charts.length;
+    clear.click();
+    await waitFor(() => testcase.value === "" && (hasOtherTests
+      ? charts.length > chartCount && charts[charts.length - 1].options
+      : document.getElementById("kpi-status").textContent.includes("No KPI history")));
+    if (hasOtherTests) {
+      expect(charts[charts.length - 1].options.series).toHaveLength(1);
+      expect(charts[charts.length - 1].options.series[0].data[0].point.test_name).toBe(testNames[1]);
+    } else expect(document.querySelectorAll(".kpi-chart-section")).toHaveLength(0);
+  });
+
+  test("metric changes explicitly reset a retained missing test selection", async () => {
+    const { charts } = await loadChart({
+      historyNames: params => Date.parse(params.get("to")) - Date.parse(params.get("from")) === 7 * 86400000
+        ? [testNames[1]] : testNames,
+    });
+    const testcase = document.getElementById("kpi-testcase");
+    testcase.value = testNames[0];
+    testcase.dispatchEvent(new Event("change"));
+    await waitFor(() => charts.length === 2 && charts[1].options);
+    document.querySelector('[data-days="7"]').click();
+    await waitFor(() => charts.length === 3 && charts[2].options);
+    expect(testcase.value).toBe(testNames[0]);
+    const metric = document.getElementById("kpi-metric");
+    metric.value = "latency.average\tms";
+    metric.dispatchEvent(new Event("change"));
+    await waitFor(() => charts.length === 4 && charts[3].options);
+    expect(testcase.value).toBe("");
+    expect([...testcase.options].map(option => option.value)).not.toContain(testNames[0]);
+    expect(charts[3].options.series[0].data[0].point.test_name).toBe(testNames[1]);
+  });
+
   test("clicking a data line focuses its matching test series", async () => {
     const { chart, legend } = await loadChart();
 
@@ -294,6 +432,60 @@ describe("KPI grouped chart interactions", () => {
 
     expect(legend.scrollTop).toBe(96);
     expect(legend.querySelector('[aria-pressed="true"]').title).toBe(testNames[1]);
+  });
+
+  test("comparison rejects 50 peers without changing charts or state and accepts 49", async () => {
+    const targets = [
+      { key: "device-a", display_name: "Device A" },
+      ...Array.from({ length: 50 }, (_, index) => ({ key: `peer-${index}`, display_name: `Peer ${index}` })),
+    ];
+    const { chart, charts, legend } = await loadChart({ targets });
+    legend.querySelector(`[data-test-name="${testNames[0]}"]`).click();
+    await waitFor(() => legend.querySelector(".kpi-series-compare"));
+    legend.querySelector(".kpi-series-compare").click();
+    const dialog = document.getElementById("kpi-compare-dialog");
+    const checkboxes = [...dialog.querySelectorAll(".kpi-comparison-target input")];
+    expect(checkboxes).toHaveLength(50);
+    checkboxes.forEach(checkbox => {
+      checkbox.checked = true;
+      checkbox.dispatchEvent(new Event("change"));
+    });
+    const originalOptions = chart.options;
+    const originalSection = document.querySelector(".kpi-chart-section");
+    window.fetch.mockClear();
+    document.getElementById("kpi-compare-apply").click();
+    expect(document.getElementById("kpi-comparison-note").textContent).toContain("at most 49");
+    expect(document.getElementById("kpi-comparison-note").textContent).toContain("baseline");
+    expect(dialog.open).toBe(true);
+    expect(window.fetch).not.toHaveBeenCalled();
+    expect(chart.dispose).not.toHaveBeenCalled();
+    expect(chart.options).toBe(originalOptions);
+    expect(charts).toHaveLength(1);
+    expect(document.querySelector(".kpi-chart-section")).toBe(originalSection);
+    expect(document.getElementById("kpi-metric").value).toBe("");
+    expect(document.getElementById("kpi-testcase").value).toBe("");
+    expect(document.querySelector(".kpi-clear-comparison")).toBeNull();
+    document.getElementById("kpi-compare-all").click();
+    expect(document.getElementById("kpi-comparison-note").textContent).toContain("maximum of 50");
+    expect(window.fetch).not.toHaveBeenCalled();
+    checkboxes[49].checked = false;
+    checkboxes[49].dispatchEvent(new Event("change"));
+    document.getElementById("kpi-compare-apply").click();
+    await waitFor(() => !dialog.open && charts.length > 1 && charts[charts.length - 1].options);
+    expect(chart.dispose).toHaveBeenCalledTimes(1);
+    const requests = window.fetch.mock.calls.map(([input]) => new URL(input, window.location.origin));
+    requests.forEach(url => {
+      expect(url.searchParams.getAll("target")).toEqual(targets.slice(0, 50).map(target => target.key));
+    });
+    expect(document.getElementById("kpi-metric").value).toBe("latency.average\tms");
+    expect(document.getElementById("kpi-testcase").value).toBe(testNames[0]);
+    document.querySelector(".kpi-clear-comparison").click();
+    await waitFor(() => document.getElementById("kpi-metric").value === "" && charts.length > 2
+      && charts[charts.length - 1].options);
+    expect(document.getElementById("kpi-testcase").value).toBe("");
+    const restoredRequests = window.fetch.mock.calls.slice(requests.length)
+      .map(([input]) => new URL(input, window.location.origin));
+    restoredRequests.forEach(url => expect(url.searchParams.getAll("target")).toEqual(["device-a"]));
   });
 
   test("comparison finds targets on later pages and clears back to the browse view", async () => {

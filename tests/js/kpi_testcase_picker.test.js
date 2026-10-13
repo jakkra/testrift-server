@@ -39,6 +39,74 @@ test("matches case-insensitive tokens in any order and ranks direct matches befo
   expect(search("simpelx station")).toContain("Station TCP");
 });
 
+test.each([
+  "吞吐量",
+  "Пропускная способность",
+  "Ταχύτητα",
+  "Débit",
+  "سرعة",
+])("exact Unicode search selects %s instead of the first All option or an ASCII distractor", label => {
+  const value = "NUnitTest.Unicode";
+  select.replaceChildren(
+    new Option("All test families", ""),
+    new Option("ASCII throughput", "NUnitTest.Ascii"),
+    new Option(label, value),
+  );
+  picker.refresh();
+  expect(search(label.toLowerCase())).toEqual([label]);
+  key("Enter");
+  expect(select.value).toBe(value);
+  expect(picker.input.value).toBe(label);
+});
+
+test("exact search preserves meaningful combining marks and canonically equivalent names", () => {
+  select.replaceChildren(
+    new Option("All test families", ""),
+    new Option("किरण", "NUnitTest.First"),
+    new Option("कुरण", "NUnitTest.Second"),
+    new Option("Débit", "NUnitTest.Accent"),
+  );
+  picker.refresh();
+  expect(search("कुरण")[0]).toBe("कुरण");
+  key("Enter");
+  expect(select.value).toBe("NUnitTest.Second");
+  expect(search("De\u0301bit")[0]).toBe("Débit");
+  key("Enter");
+  expect(select.value).toBe("NUnitTest.Accent");
+});
+
+test.each([
+  ["吞吐量", "缓冲", "２４４", "２４３"],
+  ["Пропускная", "Буфер", "244", "243"],
+  ["Ταχύτητα", "Μνήμη", "٢٤٤", "٢٤٣"],
+])("reordered and joined Unicode words and numbers match strictly: %s %s %s", (firstWord, secondWord, number, wrongNumber) => {
+  const label = `${firstWord} ${secondWord} ${number}`;
+  select.replaceChildren(
+    new Option("All test families", ""),
+    new Option(`ASCII throughput ${number}`, "NUnitTest.Ascii"),
+    new Option(label, "NUnitTest.Unicode"),
+    new Option(`${firstWord} ${secondWord} ${wrongNumber}`, "NUnitTest.WrongNumber"),
+  );
+  picker.refresh();
+  expect(search(`${number} ${secondWord} ${firstWord}`)).toEqual([label]);
+  expect(search(`${secondWord}${number}${firstWord}`)).toEqual([label]);
+  expect(search(`${wrongNumber} ${secondWord} ${firstWord}`)).toEqual([
+    `${firstWord} ${secondWord} ${wrongNumber}`,
+  ]);
+});
+
+test("Unicode alphabetic tokens allow fuzzy matches but numeric tokens remain strict", () => {
+  select.replaceChildren(
+    new Option("All test families", ""),
+    new Option("ASCII throughput 244", "NUnitTest.Ascii"),
+    new Option("Буферизация 244", "NUnitTest.Unicode"),
+    new Option("Буферизация 245", "NUnitTest.WrongNumber"),
+  );
+  picker.refresh();
+  expect(search("буферизаця244")).toEqual(["Буферизация 244"]);
+  expect(search("буферизаця243")).toEqual([]);
+});
+
 test("joined words and numbers require both fragments without fuzzy numeric matches", () => {
   select.replaceChildren(
     new Option("All test families", ""),
