@@ -184,7 +184,7 @@
         const collection = state.collection;
         document.getElementById('collection-name').value = collection.display_name || '';
         document.getElementById('collection-description').value = collection.description || '';
-        document.getElementById('collection-key-display').textContent = collection.key;
+        document.getElementById('collection-url-key').value = collection.key;
         renderMembers();
         if (!state.profileFormOpen) {
             state.editingProfileId = null;

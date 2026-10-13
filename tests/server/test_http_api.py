@@ -157,6 +157,45 @@ class TestHTTPAPI:
         assert hasattr(response, 'content_type')
 
     @pytest.mark.asyncio
+    async def test_collection_profile_accepts_custom_run_purpose(self, initialized_db):
+        from testrift_server.api_handlers import api_collection_profiles_handler, api_profile_handler
+
+        await initialized_db.create_collection("history", "History")
+        request = MagicMock()
+        request.match_info = {"key": "history"}
+        request.json = AsyncMock(return_value={
+            "name": "Imported history",
+            "purpose": "historical-import",
+            "window_hours": 2160,
+            "is_primary": True,
+            "selectors": [],
+        })
+
+        response = await api_collection_profiles_handler(request)
+
+        assert response.status == 201
+        created = json.loads(response.text)["data"]
+        assert created["purpose"] == "historical-import"
+        assert created["window_hours"] == 2160
+        assert created["is_primary"]
+        assert created["selectors"] == []
+
+        request.method = "PUT"
+        request.match_info = {"profile_id": str(created["id"])}
+        request.json.return_value["name"] = "Renamed history"
+        response = await api_profile_handler(request)
+
+        assert response.status == 200
+        assert json.loads(response.text)["data"]["purpose"] == "historical-import"
+
+    @pytest.mark.parametrize("purpose", [None, "", " \t", 42, [], {}])
+    def test_collection_profile_rejects_invalid_run_purpose(self, purpose):
+        from testrift_server.api_handlers import _profile_values
+
+        with pytest.raises(ValueError, match="purpose must be a nonblank string"):
+            _profile_values({"name": "History", "purpose": purpose, "window_hours": 2160})
+
+    @pytest.mark.asyncio
     async def test_collection_summary_includes_run_results_and_missing_targets(self):
         from testrift_server.api_handlers import api_collection_summary_handler
 

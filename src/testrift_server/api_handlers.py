@@ -41,7 +41,6 @@ from .ai_analysis import create_collection_report
 logger = logging.getLogger(__name__)
 
 TARGET_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-PURPOSES = {"nightly", "release", "feature", "manual", "sanity", "rerun"}
 MAX_KPI_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_KPI_SAMPLES = 10000
 KPI_METRIC_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
@@ -534,8 +533,8 @@ def _profile_values(body):
     name = _validate_display_name(body.get("name"))
     purpose = body.get("purpose")
     window_hours = body.get("window_hours")
-    if purpose not in PURPOSES:
-        raise ValueError("purpose is unsupported")
+    if not isinstance(purpose, str) or not purpose.strip():
+        raise ValueError("purpose must be a nonblank string")
     if not isinstance(window_hours, int) or window_hours <= 0:
         raise ValueError("window_hours must be a positive integer")
     selectors = body.get("selectors", [])
