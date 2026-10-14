@@ -1268,6 +1268,10 @@ class TestResultsDatabase:
         if target_keys:
             clauses.append("tr.target_key IN (" + ", ".join("?" for _ in target_keys) + ")")
             params.extend(target_keys)
+        purposes = filters.get("purposes", None if filters.get("run_id") else ("nightly", "release"))
+        if purposes:
+            clauses.append("tr.purpose IN (" + ", ".join("?" for _ in purposes) + ")")
+            params.extend(purposes)
         if filters.get("start_time"):
             clauses.append("julianday(COALESCE(ks.sample_time, tr.start_time)) >= julianday(?)")
             params.append(filters["start_time"])

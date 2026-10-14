@@ -1,4 +1,24 @@
-# KPI Dimension Options
+# KPI Queries
+
+## Run Purpose
+
+Cross-run KPI queries default to runs with purpose `nightly` or `release`.
+This applies to history, comparisons, catalogs, run lists, source options,
+and dimension options. Manual, feature, sanity, and rerun measurements remain
+stored, but do not enter these default trend views.
+
+Pass `purpose=manual` to inspect manual or sandbox measurements, or
+`purpose=all` to include every purpose. A single explicit purpose can be
+`nightly`, `release`, `feature`, `manual`, `sanity`, or `rerun`; unsupported
+values return HTTP 400. All other filters still apply.
+
+Queries selecting an explicit run ID, including `GET /api/runs/{run_id}/kpis`,
+return that run's measurements regardless of purpose unless an explicit
+purpose filter is supplied. Uploads and existing stored data are unchanged.
+Run purpose is supplied by the producer; a firmware tag alone does not make
+a run nightly, and this filter does not enforce tag naming conventions.
+
+## KPI Dimension Options
 
 Dimension options retain the existing scalar `values` array and add an
 `options` array in the same order. Each option contains `value`, `value_type`

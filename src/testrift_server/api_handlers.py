@@ -181,6 +181,15 @@ def _kpi_read_filters(request, require_series=False):
     if require_series and (not filters.get("metric_key") or not filters.get("unit")):
         raise ValueError("metric_key and unit are required")
 
+    purpose = query.get("purpose")
+    if purpose is not None:
+        if purpose == "all":
+            filters["purposes"] = None
+        elif purpose in {"nightly", "release", "feature", "manual", "sanity", "rerun"}:
+            filters["purposes"] = [purpose]
+        else:
+            raise ValueError("purpose is unsupported")
+
     for key in ("source_role", "source_branch", "source_revision"):
         value = query.get(key)
         if value:

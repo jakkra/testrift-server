@@ -79,6 +79,7 @@ async def kpi_db(tmp_path, monkeypatch):
         dut="Device A",
         target_key="device-a",
         run_name="KPI pilot",
+        purpose="nightly",
     )
     assert await database.db.insert_test_run(run, {}, {
         "test-system": {"branch": "main", "revision": "abc123"},
@@ -140,7 +141,7 @@ async def test_kpi_batch_preloads_run_names_once_and_bulk_inserts(kpi_db, monkey
     assert await kpi_db.insert_test_run(TestRunData(
         run_id="other-run", status="running", start_time="2026-09-23T10:00:00Z",
         end_time=None, retention_days=None, local_run=True, dut="Other",
-        target_key="device-a",
+        target_key="device-a", purpose="nightly",
     ), {}, {})
     async with kpi_db.get_connection() as connection:
         await connection.execute("CREATE TABLE legacy_test_cases AS SELECT * FROM test_cases")
@@ -460,6 +461,54 @@ async def test_kpi_upload_and_filters_accept_32_dimensions(kpi_db, kpi_dimension
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("purpose", ["nightly", "release", "manual", "feature", "sanity", "rerun"])
+async def test_kpi_trends_filter_purpose_but_preserve_run_access(kpi_db, purpose):
+    from testrift_server.api_handlers import api_kpi_history_handler, api_run_kpis_handler
+
+    async with kpi_db.get_connection() as connection:
+        await connection.execute(
+            "UPDATE test_runs SET purpose = ? WHERE run_id = ?",
+            (purpose, "pilot-run-1"),
+        )
+        await connection.commit()
+    assert (await api_run_kpis_handler(_request(_payload()))).status == 201
+    query = {
+        "target": "device-a",
+        "metric_key": "file_download.rx_throughput",
+        "unit": "bps",
+        "test_name": "NUnitTest.FileDownload.Download_1M",
+    }
+    default = await api_kpi_history_handler(Request("GET", query=query))
+    assert default.status == 200
+    assert json.loads(default.text)["pagination"]["count"] == int(purpose in {"nightly", "release"})
+
+    for selection in (purpose, "all"):
+        selected = await api_kpi_history_handler(Request("GET", query={**query, "purpose": selection}))
+        assert selected.status == 200
+        assert json.loads(selected.text)["pagination"]["count"] == 1
+
+    run_page = await api_run_kpis_handler(Request("GET", run_id="pilot-run-1"))
+    assert run_page.status == 200
+    assert json.loads(run_page.text)["pagination"]["count"] == 2
+    explicit_run = await api_kpi_history_handler(Request("GET", query={**query, "run_id": "pilot-run-1"}))
+    assert explicit_run.status == 200
+    assert json.loads(explicit_run.text)["pagination"]["count"] == 1
+    excluded = await api_run_kpis_handler(Request(
+        "GET", run_id="pilot-run-1", query={"purpose": "manual" if purpose == "nightly" else "nightly"},
+    ))
+    assert excluded.status == 200
+    assert json.loads(excluded.text)["pagination"]["count"] == 0
+
+
+@pytest.mark.parametrize("purpose", ["", "sandbox", "Nightly", "nightly,release"])
+def test_kpi_reads_reject_unsupported_purpose(purpose):
+    from testrift_server.api_handlers import _kpi_read_filters
+
+    with pytest.raises(ValueError, match="purpose is unsupported"):
+        _kpi_read_filters(Request("GET", query={"purpose": purpose}))
+
+
+@pytest.mark.asyncio
 async def test_run_catalog_and_series_reads_filter_and_paginate(kpi_db):
     from testrift_server.api_handlers import (
         api_kpi_catalog_handler,
@@ -566,7 +615,7 @@ async def test_mixed_scalar_dimension_filters_keep_boolean_number_and_string_sep
         assert await kpi_db.insert_test_run(TestRunData(
             run_id="mixed-run-b", status="finished", start_time="2026-09-23T11:00:00Z",
             end_time=None, retention_days=None, local_run=True, dut="Device B",
-            target_key="device-b",
+            target_key="device-b", purpose="nightly",
         ), {}, {})
         assert (await api_run_kpis_handler(_request(payload, "mixed-run-b"))).status == 201
         targets.append(("target", "device-b"))
@@ -630,7 +679,7 @@ async def test_dimension_option_tokens_round_trip_exact_scalars(kpi_db, reader):
         assert await kpi_db.insert_test_run(TestRunData(
             run_id="token-run-b", status="finished", start_time="2026-09-23T11:00:00Z",
             end_time=None, retention_days=None, local_run=True, dut="Device B",
-            target_key="device-b",
+            target_key="device-b", purpose="nightly",
         ), {}, {})
         assert (await api_run_kpis_handler(_request(payload, "token-run-b"))).status == 201
         targets.append(("target", "device-b"))
@@ -822,6 +871,7 @@ async def test_kpi_history_can_compare_the_same_test_across_targets(kpi_db):
         dut="Device B",
         target_key="device-b",
         run_name="Device B KPI pilot",
+        purpose="nightly",
     )
     assert await kpi_db.insert_test_run(other_run, {}, {})
     assert (await api_run_kpis_handler(_request(_payload(value=820000), other_run.run_id))).status == 201
