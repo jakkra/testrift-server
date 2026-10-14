@@ -1468,7 +1468,7 @@ class TestResultsDatabase:
         query = f"""WITH dimension_sets AS (
                        SELECT DISTINCT ks.dimensions_json
                        FROM kpi_samples ks
-                       JOIN test_runs tr ON tr.run_id = ks.run_id
+                       CROSS JOIN test_runs tr ON tr.run_id = ks.run_id
                        WHERE {where}
                    )
                    SELECT DISTINCT dimension.key, dimension.type, dimension.value
