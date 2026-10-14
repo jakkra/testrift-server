@@ -185,7 +185,7 @@ def _kpi_read_filters(request, require_series=False):
     if purpose is not None:
         if purpose == "all":
             filters["purposes"] = None
-        elif purpose in {"nightly", "release", "feature", "manual", "sanity", "rerun"}:
+        elif purpose in {"nightly", "release", "feature", "manual", "sanity", "rerun", "historical-import"}:
             filters["purposes"] = [purpose]
         else:
             raise ValueError("purpose is unsupported")

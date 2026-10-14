@@ -461,7 +461,7 @@ async def test_kpi_upload_and_filters_accept_32_dimensions(kpi_db, kpi_dimension
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("purpose", ["nightly", "release", "manual", "feature", "sanity", "rerun"])
+@pytest.mark.parametrize("purpose", ["nightly", "release", "historical-import", "manual", "feature", "sanity", "rerun"])
 async def test_kpi_trends_filter_purpose_but_preserve_run_access(kpi_db, purpose):
     from testrift_server.api_handlers import api_kpi_history_handler, api_run_kpis_handler
 
@@ -480,7 +480,7 @@ async def test_kpi_trends_filter_purpose_but_preserve_run_access(kpi_db, purpose
     }
     default = await api_kpi_history_handler(Request("GET", query=query))
     assert default.status == 200
-    assert json.loads(default.text)["pagination"]["count"] == int(purpose in {"nightly", "release"})
+    assert json.loads(default.text)["pagination"]["count"] == int(purpose in {"nightly", "release", "historical-import"})
 
     for selection in (purpose, "all"):
         selected = await api_kpi_history_handler(Request("GET", query={**query, "purpose": selection}))

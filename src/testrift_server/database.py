@@ -1268,7 +1268,7 @@ class TestResultsDatabase:
         if target_keys:
             clauses.append("tr.target_key IN (" + ", ".join("?" for _ in target_keys) + ")")
             params.extend(target_keys)
-        purposes = filters.get("purposes", None if filters.get("run_id") else ("nightly", "release"))
+        purposes = filters.get("purposes", None if filters.get("run_id") else ("nightly", "release", "historical-import"))
         if purposes:
             clauses.append("tr.purpose IN (" + ", ".join("?" for _ in purposes) + ")")
             params.extend(purposes)

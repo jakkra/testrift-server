@@ -2,14 +2,15 @@
 
 ## Run Purpose
 
-Cross-run KPI queries default to runs with purpose `nightly` or `release`.
+Cross-run KPI queries default to runs with purpose `nightly`, `release`, or
+`historical-import`, preserving previously imported trend data.
 This applies to history, comparisons, catalogs, run lists, source options,
 and dimension options. Manual, feature, sanity, and rerun measurements remain
 stored, but do not enter these default trend views.
 
 Pass `purpose=manual` to inspect manual or sandbox measurements, or
 `purpose=all` to include every purpose. A single explicit purpose can be
-`nightly`, `release`, `feature`, `manual`, `sanity`, or `rerun`; unsupported
+`nightly`, `release`, `historical-import`, `feature`, `manual`, `sanity`, or `rerun`; unsupported
 values return HTTP 400. All other filters still apply.
 
 Queries selecting an explicit run ID, including `GET /api/runs/{run_id}/kpis`,
