@@ -12,6 +12,7 @@ const GOLDEN_ANGLE = 137.508;
 // Device and message processing constants
 const DevMode = { Normal: 0, Setup: 1, Teardown: 2 };
 const MSG_JOIN_TMO_MS = 10;
+let logTimeRefreshPending = false;
 
 // Counter for generating unique IDs
 let lblId = 0;
@@ -26,8 +27,12 @@ let lblId = 0;
 function refreshCommentThreadVisibility() {
     if (window.CommentsUI && window.CommentsUI.Log && typeof window.CommentsUI.Log.applyCommentedFilter === 'function') {
         window.CommentsUI.Log.applyCommentedFilter();
+    } else {
+        refreshLogTimeDisplay();
     }
 }
+
+document.addEventListener('logvisibilitychange', refreshLogTimeDisplay);
 
 /**
  * Generate a unique color for each index using the golden angle.
@@ -367,15 +372,7 @@ function processLogMessage(d, compMap, chanList, atLookupTable) {
     const timeCell = $(`<td class="fit log-time">`).css("padding", "3px");
     timeCell.attr('data-original-time', originalTime);
 
-    // Display time based on current mode
-    if (showDeltaTime) {
-        const deltaTime = calculateDeltaTime(originalTime);
-        timeCell.text(deltaTime).css({
-            'font-family': 'monospace'
-        });
-    } else {
-        timeCell.text(time);
-    }
+    timeCell.text(time);
 
     timeCell.appendTo(row);
 
@@ -473,6 +470,7 @@ function processLogMessage(d, compMap, chanList, atLookupTable) {
                 $("#msg_table tbody tr.teardown-log-row").toggle(!isCollapsed);
                 // Update the glyph so it never "disappears" due to pseudo-element/CSS quirks
                 header.find(".teardown-toggle-icon").text(isCollapsed ? "▸" : "▾");
+                refreshCommentThreadVisibility();
             };
 
             const toggle = () => {
@@ -501,6 +499,14 @@ function processLogMessage(d, compMap, chanList, atLookupTable) {
         }
     } else {
         row.appendTo(msgTableBody);
+    }
+
+    if (showDeltaTime && !logTimeRefreshPending) {
+        logTimeRefreshPending = true;
+        queueMicrotask(() => {
+            logTimeRefreshPending = false;
+            refreshCommentThreadVisibility();
+        });
     }
 
     // Always ensure live indicator is at the bottom if test case is still running
@@ -649,41 +655,33 @@ function calculateDeltaTime(currentTimeString) {
 function toggleTimeDisplay() {
     showDeltaTime = !showDeltaTime;
     const button = document.getElementById('time-display-toggle');
-    const messageRows = document.querySelectorAll('#msg_table tbody tr.log-entry-row');
-
-    if (showDeltaTime) {
-        button.textContent = 'Show Absolute Time';
-        lastVisibleMessageTime = null; // Reset for delta calculation
-
-        messageRows.forEach((row, index) => {
-            const timeCell = row.querySelector('.log-time');
-            if (!timeCell) return;
-            const originalTime = timeCell.getAttribute('data-original-time');
-
-            if (originalTime) {
-                const deltaTime = calculateDeltaTime(originalTime);
-                timeCell.textContent = deltaTime;
-                timeCell.style.fontFamily = 'monospace';
-            }
-        });
-    } else {
-        button.textContent = 'Show Delta Time';
-
-        messageRows.forEach((row, index) => {
-            const timeCell = row.querySelector('.log-time');
-            if (!timeCell) return;
-            const originalTime = timeCell.getAttribute('data-original-time');
-
-            if (originalTime) {
-                timeCell.textContent = formatLogTime(originalTime);
-                timeCell.style.fontFamily = '';
-                timeCell.style.color = '';
-            }
-        });
-    }
+    button.textContent = showDeltaTime ? 'Show Absolute Time' : 'Show Delta Time';
+    refreshLogTimeDisplay();
 
     // Save user preference
     saveTimeDisplayPreference();
+}
+
+function refreshLogTimeDisplay() {
+    lastVisibleMessageTime = null;
+    const messageRows = Array.from(document.querySelectorAll('#msg_table tbody tr.log-entry-row'));
+    const rowsToUpdate = showDeltaTime
+        ? messageRows.filter(row => !row.hidden && getComputedStyle(row).display !== 'none')
+        : messageRows;
+    rowsToUpdate.forEach(row => {
+        const timeCell = row.querySelector('.log-time');
+        if (!timeCell) return;
+        const originalTime = timeCell.getAttribute('data-original-time');
+        if (!originalTime) return;
+        if (showDeltaTime) {
+            timeCell.textContent = calculateDeltaTime(originalTime);
+            timeCell.style.fontFamily = 'monospace';
+        } else {
+            timeCell.textContent = formatLogTime(originalTime);
+            timeCell.style.fontFamily = '';
+            timeCell.style.color = '';
+        }
+    });
 }
 
 function convertTimesToLocal() {
@@ -701,29 +699,7 @@ function convertTimesToLocal() {
         }
     });
 
-    // Convert timestamps in the message log table
-    // Skip non-log rows like the live indicator and teardown header.
-    const isoLike = /^\s*\d{4}-\d{2}-\d{2}T/;
-    document.querySelectorAll('#msg_table tbody tr.log-entry-row td.log-time').forEach(cell => {
-        const originalTime = cell.getAttribute('data-original-time');
-        if (originalTime) {
-            if (showDeltaTime) {
-                const deltaTime = calculateDeltaTime(originalTime);
-                cell.textContent = deltaTime;
-                cell.style.fontFamily = 'monospace';
-            } else {
-                cell.textContent = formatLogTime(originalTime);
-                cell.style.fontFamily = '';
-            }
-        } else {
-            // Fallback for cells without data-original-time attribute
-            const text = cell.textContent.trim();
-            // Only convert if it actually looks like an ISO timestamp (avoid matching words like "Teardown")
-            if (text && (isoLike.test(text) || text.endsWith('Z'))) {
-                cell.textContent = formatLogTime(text);
-            }
-        }
-    });
+    refreshLogTimeDisplay();
 }
 
 // Load time display preference from localStorage
@@ -766,34 +742,8 @@ function applySidebarPreference() {
 // Apply loaded time display preference to UI
 function applyTimeDisplayPreference() {
     const button = document.getElementById('time-display-toggle');
-    if (showDeltaTime) {
-        button.textContent = 'Show Absolute Time';
-        // Apply delta time display to existing messages
-        const messageRows = document.querySelectorAll('#msg_table tbody tr.log-entry-row');
-        lastVisibleMessageTime = null; // Reset for delta calculation
-
-        // Sort messages by timestamp to ensure correct delta calculation
-        const sortedRows = Array.from(messageRows).sort((a, b) => {
-            const timeA = a.querySelector('.log-time') && a.querySelector('.log-time').getAttribute('data-original-time');
-            const timeB = b.querySelector('.log-time') && b.querySelector('.log-time').getAttribute('data-original-time');
-            if (!timeA || !timeB) return 0;
-            return new Date(timeA) - new Date(timeB);
-        });
-
-        sortedRows.forEach((row, index) => {
-            const timeCell = row.querySelector('.log-time');
-            if (!timeCell) return;
-            const originalTime = timeCell.getAttribute('data-original-time');
-
-            if (originalTime) {
-                const deltaTime = calculateDeltaTime(originalTime);
-                timeCell.textContent = deltaTime;
-                timeCell.style.fontFamily = 'monospace';
-            }
-        });
-    } else {
-        button.textContent = 'Show Delta Time';
-    }
+    button.textContent = showDeltaTime ? 'Show Absolute Time' : 'Show Delta Time';
+    refreshLogTimeDisplay();
 }
 
 

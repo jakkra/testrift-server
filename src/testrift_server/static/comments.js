@@ -1014,6 +1014,7 @@
                 const end = Number(thread.getAttribute("data-thread-end"));
                 thread.style.display = isRangeVisible(start, end) ? "" : "none";
             });
+            document.dispatchEvent(new Event("logvisibilitychange"));
         },
 
         highlightMetrics(comment) {
