@@ -412,6 +412,61 @@ async def test_case_log_handler(request):
     return web.Response(text=html, content_type="text/html", headers=headers)
 
 
+async def test_case_log_download_handler(request):
+    """Download every stored message for one test case as UTF-8 text."""
+    run_id = request.match_info["run_id"]
+    tc_id = request.match_info["test_case_id"]
+    if not validate_run_id(run_id) or not validate_test_case_id(tc_id):
+        return web.Response(status=400, text="Invalid run ID or test case ID")
+
+    run = request.app["ws_server"].test_runs.get(run_id)
+    in_memory = run is not None
+    if run is None:
+        run = TestRunData.load_from_disk(run_id)
+    if run is None:
+        return web.Response(status=404, text="Run not found")
+    test_case = find_test_case_by_tc_id(run, tc_id)
+    if test_case is None:
+        return web.Response(status=404, text="Test case not found")
+
+    snapshot = TestCaseData.from_dict(run, test_case.full_name, test_case.to_dict())
+    if not snapshot.load_log_from_disk():
+        if not in_memory or (not test_case.logs and run.status != "running" and test_case.status != "running"):
+            return web.Response(status=404, text="Log not found")
+        snapshot.logs = list(test_case.logs)
+        snapshot.stack_traces = list(test_case.stack_traces)
+
+    entries = decode_log_entries(snapshot.logs, run.string_table or {})
+    lines = [f"Test: {test_case.full_name}", f"Run: {run_id}", ""]
+    for entry in entries:
+        fields = [entry["timestamp"]]
+        fields.extend(
+            f"[{entry[field]}]"
+            for field in ("component", "channel", "dir", "phase")
+            if entry.get(field)
+        )
+        lines.append(" ".join(fields) + " " + str(entry.get("message", "")))
+    if snapshot.stack_traces:
+        lines.extend(["", "Stack Traces"])
+        for trace in snapshot.stack_traces:
+            lines.append(f"{trace.get('timestamp', '')} {trace.get('exception_type', '')}: {trace.get('message', '')}")
+            stack = trace.get("stack_trace") or []
+            if isinstance(stack, list):
+                lines.extend(str(line) for line in stack)
+            else:
+                lines.append(str(stack))
+
+    return web.Response(
+        text="\n".join(lines) + "\n",
+        content_type="text/plain",
+        headers={
+            **NO_CACHE_HEADERS,
+            "Content-Disposition": f'attachment; filename="{run_id}-{tc_id}.log"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 # --- ZIP Export Handler ---
 
 async def zip_export_handler(request):
@@ -1098,6 +1153,7 @@ def get_routes():
         (("GET",), "/", index_handler),
         (("GET",), "/testRun/{run_id}/index.html", test_run_index_handler),
         (("GET",), "/testRun/{run_id}/log/{test_case_id}.html", test_case_log_handler),
+        (("GET",), "/testRun/{run_id}/log/{test_case_id}.txt", test_case_log_download_handler),
         (("GET",), "/testRun/{tail:.*}", static_handler),
         (("GET",), "/static/{path:.*}", static_file_handler),
         (("GET",), "/export/{run_id}.zip", zip_export_handler),

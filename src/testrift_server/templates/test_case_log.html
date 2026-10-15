@@ -218,6 +218,11 @@
                         <div class="log-header">
                 <h2>Message Log</h2>
                             <div class="log-controls">
+                                {% if server_mode %}
+                                <a href="/testRun/{{ run_id }}/log/{{ resolved_tc_id }}.txt" class="tr-log-btn" download title="Download full log" aria-label="Download full log">
+                                    <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span>
+                                </a>
+                                {% endif %}
                                 <label id="commentedLinesFilterWrap" class="log-filter-check" style="display:none;">
                                     <input type="checkbox" id="commentedLinesOnly">
                                     <span>Commented lines only</span>
